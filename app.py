@@ -94,7 +94,13 @@ if uploaded_file and uploaded_equiv:
     # =======================
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # Hoja con los datos tal cual se cargaron (original)
+        pd.read_excel(uploaded_file).to_excel(writer, index=False, sheet_name="Original")
+        
+        # Hoja con todos los registros procesados
         df.to_excel(writer, index=False, sheet_name="Resultado General")
+        
+        # Hojas con tipo_ctb = 1, separado por mayor=1101 o no
         df_tipo1_con_1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
         df_tipo1_sin_1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
