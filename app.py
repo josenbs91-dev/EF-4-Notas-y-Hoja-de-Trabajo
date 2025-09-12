@@ -58,11 +58,6 @@ if uploaded_file and uploaded_equiv:
     )
 
     # =======================
-    # Crear clave de unión mayor.sub_cta
-    # =======================
-    df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
-
-    # =======================
     # Validar columnas de equivalencias
     # =======================
     if "Cuentas Contables" not in df_equiv.columns or "Rubros" not in df_equiv.columns:
@@ -70,11 +65,13 @@ if uploaded_file and uploaded_equiv:
         st.stop()
 
     # =======================
-    # Unir equivalencias (normalizando claves a string)
+    # Construir clave_cta siempre con punto
     # =======================
-    df["clave_cta"] = df["clave_cta"].astype(str).str.strip()
-    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
+    df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
+    # =======================
+    # Unir equivalencias
+    # =======================
     df = df.merge(
         df_equiv[["Cuentas Contables", "Rubros"]],
         left_on="clave_cta",
