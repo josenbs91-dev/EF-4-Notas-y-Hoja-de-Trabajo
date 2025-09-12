@@ -67,7 +67,12 @@ if uploaded_file and uploaded_equiv:
     # =======================
     # Construir clave_cta siempre con punto
     # =======================
-    df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
+    df["mayor"] = df["mayor"].astype(str).str.strip()
+    df["sub_cta"] = df["sub_cta"].astype(str).str.strip()
+    df["clave_cta"] = df["mayor"] + "." + df["sub_cta"]
+
+    # Asegurar que las equivalencias también estén en string
+    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
 
     # =======================
     # Unir equivalencias
