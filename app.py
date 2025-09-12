@@ -5,7 +5,7 @@ from io import BytesIO
 st.title("Procesador de Exp Contable - SIAF")
 
 # Subir archivo
-uploaded_file = st.file_uploader("Sube tu archivo Excel", type=["xlsx"])
+uploaded_file = st.file_uploader("Sube tu archivo Excel", type=["xlsx", "xlsm"])
 
 if uploaded_file:
     df = pd.read_excel(uploaded_file)
@@ -25,12 +25,13 @@ if uploaded_file:
     exp_con_1101 = df.loc[df["mayor"] == 1101, "exp_contable"].unique()
 
     # Crear columnas ajustadas
+    # Ahora se invierte solo si NO pertenece a un exp_contable con mayor=1101
     df["debe_adj"] = df.apply(
-        lambda x: x["haber"] if x["exp_contable"] in exp_con_1101 else x["debe"],
+        lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
         axis=1
     )
     df["haber_adj"] = df.apply(
-        lambda x: x["debe"] if x["exp_contable"] in exp_con_1101 else x["haber"],
+        lambda x: x["debe"] if x["exp_contable"] not in exp_con_1101 else x["haber"],
         axis=1
     )
 
