@@ -12,13 +12,11 @@ uploaded_equiv = st.file_uploader("Sube tu archivo Excel con equivalencias (Hoja
 
 if uploaded_file and uploaded_equiv:
     # =======================
-    # Cargar archivos
+    # Cargar archivos como TEXTO para mantener formatos
     # =======================
-    df = pd.read_excel(uploaded_file)
-
-    # Buscar la hoja "Hoja de Trabajo" en el archivo de equivalencias
+    df = pd.read_excel(uploaded_file, dtype=str)
     try:
-        df_equiv = pd.read_excel(uploaded_equiv, sheet_name="Hoja de Trabajo")
+        df_equiv = pd.read_excel(uploaded_equiv, sheet_name="Hoja de Trabajo", dtype=str)
     except Exception:
         st.error("El archivo de equivalencias no contiene una hoja llamada 'Hoja de Trabajo'.")
         st.stop()
@@ -30,23 +28,22 @@ if uploaded_file and uploaded_equiv:
     st.dataframe(df_equiv.head(20))
 
     # =======================
-    # Crear exp_contable
+    # Crear exp_contable (manteniendo formatos originales)
     # =======================
     df["exp_contable"] = (
-        df["ano_eje"].map(str) + "-" +
-        df["nro_not_exp"].map(str) + "-" +
-        df["ciclo"].map(str) + "-" +
-        df["fase"].map(str)
+        df["ano_eje"] + "-" +
+        df["nro_not_exp"] + "-" +
+        df["ciclo"] + "-" +
+        df["fase"]
     )
 
     # =======================
     # Identificar exp_contables con mayor=1101
     # =======================
-    exp_con_1101 = df.loc[df["mayor"] == 1101, "exp_contable"].unique()
+    exp_con_1101 = df.loc[df["mayor"] == "1101", "exp_contable"].unique()
 
     # =======================
     # Ajuste debe/haber
-    # (solo se invierte si NO pertenece a exp_con_1101)
     # =======================
     df["debe_adj"] = df.apply(
         lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
@@ -67,10 +64,7 @@ if uploaded_file and uploaded_equiv:
     # =======================
     # Construir clave_cta manteniendo formato original
     # =======================
-    df["clave_cta"] = df["mayor"].map(str) + "." + df["sub_cta"].map(str)
-
-    # Asegurar que las equivalencias también estén en string
-    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].map(str).str.strip()
+    df["clave_cta"] = df["mayor"] + "." + df["sub_cta"]
 
     # =======================
     # Unir equivalencias
@@ -85,11 +79,8 @@ if uploaded_file and uploaded_equiv:
     # =======================
     # Dividir en dos hojas según condición
     # =======================
-    # 1. tipo_ctb = 1 y pertenece a exp_con_1101
-    df_ctb1_1101 = df[(df["tipo_ctb"] == 1) & (df["exp_contable"].isin(exp_con_1101))]
-
-    # 2. tipo_ctb = 1 y NO pertenece a exp_con_1101
-    df_ctb1_no1101 = df[(df["tipo_ctb"] == 1) & (~df["exp_contable"].isin(exp_con_1101))]
+    df_ctb1_1101 = df[(df["tipo_ctb"] == "1") & (df["exp_contable"].isin(exp_con_1101))]
+    df_ctb1_no1101 = df[(df["tipo_ctb"] == "1") & (~df["exp_contable"].isin(exp_con_1101))]
 
     st.subheader("Vista previa - tipo_ctb=1 y exp_con_1101")
     st.dataframe(df_ctb1_1101.head(20))
@@ -98,7 +89,7 @@ if uploaded_file and uploaded_equiv:
     st.dataframe(df_ctb1_no1101.head(20))
 
     # =======================
-    # Exportar a Excel
+    # Exportar a Excel (con formatos originales)
     # =======================
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
