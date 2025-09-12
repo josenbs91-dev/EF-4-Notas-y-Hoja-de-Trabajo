@@ -25,7 +25,6 @@ if uploaded_file:
     exp_con_1101 = df.loc[df["mayor"] == 1101, "exp_contable"].unique()
 
     # Crear columnas ajustadas
-    # Ahora se invierte solo si NO pertenece a un exp_contable con mayor=1101
     df["debe_adj"] = df.apply(
         lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
         axis=1
@@ -38,10 +37,14 @@ if uploaded_file:
     st.subheader("Resultado con exp_contable y debe/haber ajustados")
     st.dataframe(df.head(20))
 
-    # Crear Excel en memoria para descarga
+    # Filtrar registros con tipo_ctb = 1
+    df_tipo_ctb1 = df[df["tipo_ctb"] == 1]
+
+    # Crear Excel en memoria para descarga con dos hojas
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Resultado")
+        df_tipo_ctb1.to_excel(writer, index=False, sheet_name="Tipo_CTB_1")
 
     st.download_button(
         label="Descargar resultado en Excel",
