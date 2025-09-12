@@ -8,32 +8,16 @@ st.title("Procesador de Exp Contable - SIAF")
 uploaded_file = st.file_uploader("Sube tu archivo Excel principal", type=["xlsx"])
 
 # Subir archivo de equivalencias
-uploaded_equiv = st.file_uploader("Sube tu archivo de equivalencias (Hoja de Trabajo)", type=["xlsx"])
+equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo)", type=["xlsx"])
 
-if uploaded_file and uploaded_equiv:
-    # =======================
-    # Cargar archivos como TEXTO para mantener formatos
-    # =======================
-    df = pd.read_excel(uploaded_file, dtype=str)
-    try:
-        df_equiv = pd.read_excel(uploaded_equiv, sheet_name="Hoja de Trabajo", dtype=str)
-    except Exception:
-        st.error("El archivo de equivalencias no contiene una hoja llamada 'Hoja de Trabajo'.")
-        st.stop()
+if uploaded_file and equiv_file:
+    # Cargar archivo principal
+    df = pd.read_excel(uploaded_file)
 
-    # =======================
-    # Convertir columnas numéricas (debe, haber, saldo)
-    # =======================
-    for col in ["debe", "haber", "saldo"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Mantener formato original de los datos
+    df = df.copy()
 
-    st.subheader("Vista previa de los datos originales")
-    st.dataframe(df.head(20))
-
-    # =======================
     # Crear exp_contable
-    # =======================
     df["exp_contable"] = (
         df["ano_eje"].astype(str) + "-" +
         df["nro_not_exp"].astype(str) + "-" +
@@ -41,36 +25,33 @@ if uploaded_file and uploaded_equiv:
         df["fase"].astype(str)
     )
 
-    # =======================
     # Identificar exp_contables con mayor=1101
-    # =======================
-    exp_con_1101 = df.loc[df["mayor"] == "1101", "exp_contable"].unique()
+    exp_con_1101 = df.loc[df["mayor"] == 1101, "exp_contable"].unique()
 
-    # =======================
-    # Crear columnas ajustadas (invertir solo si NO pertenece a mayor=1101)
-    # =======================
+    # Crear columnas ajustadas
     df["debe_adj"] = df.apply(
-        lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
+        lambda x: x["haber"] if x["exp_contable"] in exp_con_1101 else x["debe"],
         axis=1
     )
     df["haber_adj"] = df.apply(
-        lambda x: x["debe"] if x["exp_contable"] not in exp_con_1101 else x["haber"],
+        lambda x: x["debe"] if x["exp_contable"] in exp_con_1101 else x["haber"],
         axis=1
     )
 
-    # =======================
-    # Construir clave_cta con punto
-    # =======================
-    df["clave_cta"] = df["mayor"].map(str) + "." + df["sub_cta"].map(str)
+    # Crear clave para equivalencias
+    df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
-    # =======================
-    # Preparar equivalencias
-    # =======================
-    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].map(str).str.strip()
+    # Cargar equivalencias
+    df_equiv = pd.read_excel(equiv_file, sheet_name="Hoja de Trabajo")
 
-    # =======================
-    # Unir equivalencias (merge)
-    # =======================
+    # Normalizar valores
+    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
+    df_equiv["Rubros"] = df_equiv["Rubros"].astype(str).str.strip()
+
+    # 🚨 Evitar duplicados que generan filas extra en el merge
+    df_equiv = df_equiv.drop_duplicates(subset=["Cuentas Contables"], keep="first")
+
+    # Merge con equivalencias
     df = df.merge(
         df_equiv[["Cuentas Contables", "Rubros"]],
         left_on="clave_cta",
@@ -78,32 +59,26 @@ if uploaded_file and uploaded_equiv:
         how="left"
     )
 
-    st.subheader("Resultado con exp_contable, debe/haber ajustados y Rubros")
-    st.dataframe(df.head(20))
-
-    # =======================
-    # Filtrar tipo_ctb = 1 en dos hojas (con mayor=1101 y sin mayor=1101)
-    # =======================
-    df_tipo1 = df[df["tipo_ctb"] == "1"]
-
-    df_tipo1_con_1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
-    df_tipo1_sin_1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
-
-    # =======================
-    # Crear Excel en memoria para descarga
-    # =======================
+    # Crear Excel en memoria
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Hoja con los datos tal cual se cargaron (original)
-        pd.read_excel(uploaded_file).to_excel(writer, index=False, sheet_name="Original")
-        
-        # Hoja con todos los registros procesados
-        df.to_excel(writer, index=False, sheet_name="Resultado General")
-        
-        # Hojas con tipo_ctb = 1, separado por mayor=1101 o no
-        df_tipo1_con_1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
-        df_tipo1_sin_1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
+        # Guardar hoja original cargada
+        df_original = pd.read_excel(uploaded_file)
+        df_original.to_excel(writer, index=False, sheet_name="Original")
 
+        # Guardar resultado general con equivalencias
+        df.to_excel(writer, index=False, sheet_name="Resultado General")
+
+        # Filtrar tipo_ctb = 1 y separar en dos hojas
+        df_tipo1 = df[df["tipo_ctb"] == 1]
+
+        df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
+        df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
+
+        df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
+        df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
+
+    # Botón de descarga
     st.download_button(
         label="Descargar resultado en Excel",
         data=output.getvalue(),
