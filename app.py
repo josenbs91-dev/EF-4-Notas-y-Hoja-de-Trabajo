@@ -33,10 +33,10 @@ if uploaded_file and uploaded_equiv:
     # Crear exp_contable
     # =======================
     df["exp_contable"] = (
-        df["ano_eje"].astype(str) + "-" +
-        df["nro_not_exp"].astype(str) + "-" +
-        df["ciclo"].astype(str) + "-" +
-        df["fase"].astype(str)
+        df["ano_eje"].map(str) + "-" +
+        df["nro_not_exp"].map(str) + "-" +
+        df["ciclo"].map(str) + "-" +
+        df["fase"].map(str)
     )
 
     # =======================
@@ -65,14 +65,12 @@ if uploaded_file and uploaded_equiv:
         st.stop()
 
     # =======================
-    # Construir clave_cta siempre con punto
+    # Construir clave_cta manteniendo formato original
     # =======================
-    df["mayor"] = df["mayor"].astype(str).str.strip()
-    df["sub_cta"] = df["sub_cta"].astype(str).str.strip()
-    df["clave_cta"] = df["mayor"] + "." + df["sub_cta"]
+    df["clave_cta"] = df["mayor"].map(str) + "." + df["sub_cta"].map(str)
 
     # Asegurar que las equivalencias también estén en string
-    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
+    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].map(str).str.strip()
 
     # =======================
     # Unir equivalencias
