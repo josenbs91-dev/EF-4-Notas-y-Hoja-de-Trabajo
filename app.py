@@ -62,14 +62,19 @@ if uploaded_file and uploaded_equiv:
     # =======================
     df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
-    # Aseguramos que la hoja de equivalencias tenga esas columnas
+    # =======================
+    # Validar columnas de equivalencias
+    # =======================
     if "Cuentas Contables" not in df_equiv.columns or "Rubros" not in df_equiv.columns:
         st.error("La hoja 'Hoja de Trabajo' debe tener las columnas 'Cuentas Contables' y 'Rubros'.")
         st.stop()
 
     # =======================
-    # Unir equivalencias
+    # Unir equivalencias (normalizando claves a string)
     # =======================
+    df["clave_cta"] = df["clave_cta"].astype(str).str.strip()
+    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
+
     df = df.merge(
         df_equiv[["Cuentas Contables", "Rubros"]],
         left_on="clave_cta",
