@@ -8,7 +8,7 @@ st.title("Procesador de Exp Contable - SIAF")
 uploaded_file = st.file_uploader("Sube tu archivo Excel principal", type=["xlsx"])
 
 # Subir archivo de equivalencias
-equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo)", type=["xlsx"])
+equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo + HT EF-4)", type=["xlsx"])
 
 if uploaded_file and equiv_file:
     # Cargar archivo principal
@@ -41,7 +41,7 @@ if uploaded_file and equiv_file:
     # Crear clave para equivalencias
     df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
-    # Cargar equivalencias
+    # Cargar equivalencias (Hoja de Trabajo)
     df_equiv = pd.read_excel(equiv_file, sheet_name="Hoja de Trabajo")
 
     # Normalizar valores
@@ -77,6 +77,28 @@ if uploaded_file and equiv_file:
 
         df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
         df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
+
+        # 🚨 Procesar HT EF-4 existente
+        try:
+            df_ht = pd.read_excel(equiv_file, sheet_name="HT EF-4")
+
+            # Agrupar importes desde Tipo1_sin_1101
+            resumen = df_tipo1_sin1101.groupby("Rubros").agg(
+                DEUDOR=("debe_adj", "sum"),
+                ACREEDOR=("haber_adj", "sum")
+            ).reset_index().rename(columns={"Rubros": "DESCRIPCION"})
+
+            # Merge con la hoja HT EF-4 existente
+            df_ht = df_ht.merge(
+                resumen,
+                on="DESCRIPCION",
+                how="left"
+            )
+
+            df_ht.to_excel(writer, index=False, sheet_name="HT EF-4")
+
+        except Exception as e:
+            st.warning(f"No se pudo procesar la hoja HT EF-4: {e}")
 
     # Botón de descarga
     st.download_button(
