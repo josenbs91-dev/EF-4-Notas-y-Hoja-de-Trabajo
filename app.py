@@ -100,7 +100,7 @@ if uploaded_file and equiv_file:
             df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
             df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
-        # === Copiar la hoja HT EF-4 conservando formato ===
+        # === Copiar la hoja HT EF-4 conservando formato y agregar correlativo ===
         book_equiv = openpyxl.load_workbook(equiv_file)
         if "HT EF-4" in book_equiv.sheetnames:
             sheet_equiv = book_equiv["HT EF-4"]
@@ -109,10 +109,20 @@ if uploaded_file and equiv_file:
 
             for row in sheet_equiv.iter_rows():
                 for cell in row:
-                    new_cell = sheet_copy.cell(row=cell.row, column=cell.col_idx, value=cell.value)
+                    new_cell = sheet_copy.cell(row=cell.row, column=cell.column, value=cell.value)
                     if cell.has_style:
                         new_cell._style = cell._style
-            sheet_copy.merge_cells(range_string="A5:A6")  # ejemplo de conservar combinadas
+
+            # Copiar celdas combinadas
+            for merged_cell_range in sheet_equiv.merged_cells.ranges:
+                sheet_copy.merge_cells(str(merged_cell_range))
+
+            # Insertar columna para correlativos (ajustes)
+            max_row = sheet_copy.max_row
+            sheet_copy.insert_cols(1)  # nueva primera columna
+            sheet_copy.cell(row=1, column=1, value="Correlativo Ajuste")
+            for i in range(2, max_row + 1):
+                sheet_copy.cell(row=i, column=1, value=i - 1)
 
     # Botón de descarga
     st.download_button(
