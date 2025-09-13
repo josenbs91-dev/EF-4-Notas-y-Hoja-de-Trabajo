@@ -8,9 +8,15 @@ file = st.file_uploader("Sube tu archivo principal (con mayor, sub_cta, etc.)", 
 equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo)", type=["xls", "xlsx", "xlsm"])
 
 if file and equiv_file:
-    # Cargar archivo principal
+    # ==============================
+    # 1. Cargar archivo principal
+    # ==============================
     df = pd.read_excel(file, sheet_name=0, dtype=str)
-    # Mantener formatos originales
+
+    # Normalizar nombres de columnas
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Convertir debe/haber/saldo a numéricos si existen
     for col in ["debe", "haber", "saldo"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -19,8 +25,12 @@ if file and equiv_file:
     if "mayor" in df.columns and "sub_cta" in df.columns:
         df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
-    # Cargar equivalencias
+    # ==============================
+    # 2. Cargar equivalencias
+    # ==============================
     df_equiv = pd.read_excel(equiv_file, sheet_name="Hoja de Trabajo", dtype=str)
+    df_equiv.columns = df_equiv.columns.str.strip()
+
     if "Cuentas Contables" in df_equiv.columns and "Rubros" in df_equiv.columns:
         df = df.merge(
             df_equiv[["Cuentas Contables", "Rubros"]],
@@ -29,25 +39,42 @@ if file and equiv_file:
             how="left"
         )
 
-    # Detectar expedientes con mayor=1101
+    # ==============================
+    # 3. Identificar exp_contables con mayor=1101
+    # ==============================
+    if "exp_contable" not in df.columns:
+        df["exp_contable"] = (
+            df.get("ano_eje", "").astype(str) + "-" +
+            df.get("nro_not_exp", "").astype(str) + "-" +
+            df.get("ciclo", "").astype(str) + "-" +
+            df.get("fase", "").astype(str)
+        )
+
     exp_con_1101 = df.loc[df["mayor"] == "1101", "exp_contable"].unique()
 
-    # Ajuste debe/haber
-    df["debe_adj"] = df.apply(
-        lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
-        axis=1
-    )
-    df["haber_adj"] = df.apply(
-        lambda x: x["debe"] if x["exp_contable"] not in exp_con_1101 else x["haber"],
-        axis=1
-    )
+    # ==============================
+    # 4. Ajuste de debe/haber
+    # ==============================
+    if "debe" in df.columns and "haber" in df.columns:
+        df["debe_adj"] = df.apply(
+            lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
+            axis=1
+        )
+        df["haber_adj"] = df.apply(
+            lambda x: x["debe"] if x["exp_contable"] not in exp_con_1101 else x["haber"],
+            axis=1
+        )
 
-    # Tipo1 con y sin 1101
-    df_tipo1 = df[df["tipo_ctb"] == "1"]
+    # ==============================
+    # 5. Dividir por tipo_ctb
+    # ==============================
+    df_tipo1 = df[df.get("tipo_ctb") == "1"]
     df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
     df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
 
-    # Guardar resultados en Excel
+    # ==============================
+    # 6. Guardar resultados
+    # ==============================
     with pd.ExcelWriter("resultado_final.xlsx", engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Resultado General")
         df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
@@ -55,10 +82,10 @@ if file and equiv_file:
 
         # 🚨 Procesar HT EF-4 ya existente
         try:
-            # Leemos todas las filas sin encabezado
+            # Leemos todo sin encabezados
             df_raw = pd.read_excel(equiv_file, sheet_name="HT EF-4", header=None)
 
-            # Buscar la fila donde está "DESCRIPCION"
+            # Buscar fila con "DESCRIPCION"
             header_row = df_raw.index[df_raw.apply(lambda r: r.astype(str).str.contains("DESCRIPCION", case=False).any(), axis=1)]
             if not header_row.empty:
                 header_idx = header_row[0]
