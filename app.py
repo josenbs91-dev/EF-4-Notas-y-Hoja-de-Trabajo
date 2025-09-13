@@ -111,7 +111,7 @@ if uploaded_file and equiv_file:
         # Copiar valores y estilos
         for row in sheet_equiv.iter_rows():
             for cell in row:
-                new_cell = sheet_result.cell(row=cell.row, column=cell.col_idx, value=cell.value)
+                new_cell = sheet_result.cell(row=cell.row, column=cell.column, value=cell.value)
                 if cell.has_style:
                     new_cell.font = copy(cell.font)
                     new_cell.border = copy(cell.border)
