@@ -101,32 +101,44 @@ if uploaded_file and equiv_file:
             df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
             df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
-        # === Copiar hoja HT EF-4 y sumar rubros ===
+        # === Copiar manualmente hoja HT EF-4 con estilos y sumar rubros ===
         book_equiv = openpyxl.load_workbook(equiv_file)
         book_result = writer.book
 
         if "HT EF-4" in book_equiv.sheetnames:
-            # Copiar directamente la hoja
             sheet_equiv = book_equiv["HT EF-4"]
-            sheet_copy = book_result.copy_worksheet(sheet_equiv)
-            sheet_copy.title = "HT EF-4"
+            sheet_copy = book_result.create_sheet("HT EF-4")
 
-            # Crear DataFrame auxiliar con sumatorias por rubro
+            # Copiar celdas con estilo
+            for row in sheet_equiv.iter_rows():
+                for cell in row:
+                    new_cell = sheet_copy.cell(row=cell.row, column=cell.column, value=cell.value)
+                    if cell.has_style:
+                        new_cell.font = copy(cell.font)
+                        new_cell.border = copy(cell.border)
+                        new_cell.fill = copy(cell.fill)
+                        new_cell.number_format = copy(cell.number_format)
+                        new_cell.protection = copy(cell.protection)
+                        new_cell.alignment = copy(cell.alignment)
+
+            # Copiar celdas combinadas
+            for merged_range in sheet_equiv.merged_cells.ranges:
+                sheet_copy.merge_cells(str(merged_range))
+
+            # Agregar sumas por rubro en columnas G (7) y H (8)
             if not df_tipo1_sin1101.empty and 'Rubros' in df_tipo1_sin1101.columns:
-                df_tipo1_sin1101_sum = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum().reset_index()
-                dict_debe = dict(zip(df_tipo1_sin1101_sum["Rubros"], df_tipo1_sin1101_sum["debe_adj"]))
-                dict_haber = dict(zip(df_tipo1_sin1101_sum["Rubros"], df_tipo1_sin1101_sum["haber_adj"]))
+                df_sum = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum().reset_index()
+                dict_debe = dict(zip(df_sum["Rubros"], df_sum["debe_adj"]))
+                dict_haber = dict(zip(df_sum["Rubros"], df_sum["haber_adj"]))
 
-                # Iterar filas desde la 2 (asumiendo encabezado en fila 1)
-                for row in sheet_copy.iter_rows(min_row=2):
-                    rubro = str(row[1].value).strip()  # Columna B = índice 1
+                for row in sheet_copy.iter_rows(min_row=2):  # desde fila 2
+                    rubro = str(row[1].value).strip() if row[1].value else ""
                     if rubro:
                         debe_sum = dict_debe.get(rubro, 0)
                         haber_sum = dict_haber.get(rubro, 0)
 
-                        # Escribir en columnas G (índice 6) y H (índice 7)
-                        row[6].value = debe_sum
-                        row[7].value = haber_sum
+                        sheet_copy.cell(row=row[0].row, column=7, value=debe_sum)   # Columna G
+                        sheet_copy.cell(row=row[0].row, column=8, value=haber_sum) # Columna H
 
     # Botón de descarga
     st.download_button(
