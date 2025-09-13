@@ -137,8 +137,15 @@ if uploaded_file and equiv_file:
                         debe_sum = dict_debe.get(rubro, 0)
                         haber_sum = dict_haber.get(rubro, 0)
 
-                        sheet_copy.cell(row=i, column=7, value=debe_sum)   # Columna G
-                        sheet_copy.cell(row=i, column=8, value=haber_sum)  # Columna H
+                        try:
+                            sheet_copy.cell(row=i, column=7, value=float(debe_sum))  # Columna G
+                        except:
+                            sheet_copy.cell(row=i, column=7, value=0.0)
+
+                        try:
+                            sheet_copy.cell(row=i, column=8, value=float(haber_sum))  # Columna H
+                        except:
+                            sheet_copy.cell(row=i, column=8, value=0.0)
 
     # Botón de descarga
     st.download_button(
