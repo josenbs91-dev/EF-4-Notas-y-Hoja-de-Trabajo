@@ -1,86 +1,70 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
 
-st.title("Procesador de Exp Contable - SIAF")
+st.title("Procesamiento EF-4 con Equivalencias y HT EF-4")
 
-# Subir archivo principal
-uploaded_file = st.file_uploader("Sube tu archivo Excel principal", type=["xlsx"])
+# Subida de archivos
+file = st.file_uploader("Sube tu archivo principal (con mayor, sub_cta, etc.)", type=["xls", "xlsx", "xlsm"])
+equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo)", type=["xls", "xlsx", "xlsm"])
 
-# Subir archivo de equivalencias
-equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo + HT EF-4)", type=["xlsx"])
-
-if uploaded_file and equiv_file:
+if file and equiv_file:
     # Cargar archivo principal
-    df = pd.read_excel(uploaded_file)
+    df = pd.read_excel(file, sheet_name=0, dtype=str)
+    # Mantener formatos originales
+    for col in ["debe", "haber", "saldo"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Mantener formato original de los datos
-    df = df.copy()
+    # Crear clave_cta = mayor.sub_cta
+    if "mayor" in df.columns and "sub_cta" in df.columns:
+        df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
-    # Crear exp_contable
-    df["exp_contable"] = (
-        df["ano_eje"].astype(str) + "-" +
-        df["nro_not_exp"].astype(str) + "-" +
-        df["ciclo"].astype(str) + "-" +
-        df["fase"].astype(str)
-    )
+    # Cargar equivalencias
+    df_equiv = pd.read_excel(equiv_file, sheet_name="Hoja de Trabajo", dtype=str)
+    if "Cuentas Contables" in df_equiv.columns and "Rubros" in df_equiv.columns:
+        df = df.merge(
+            df_equiv[["Cuentas Contables", "Rubros"]],
+            left_on="clave_cta",
+            right_on="Cuentas Contables",
+            how="left"
+        )
 
-    # Identificar exp_contables con mayor=1101
-    exp_con_1101 = df.loc[df["mayor"] == 1101, "exp_contable"].unique()
+    # Detectar expedientes con mayor=1101
+    exp_con_1101 = df.loc[df["mayor"] == "1101", "exp_contable"].unique()
 
-    # Crear columnas ajustadas
+    # Ajuste debe/haber
     df["debe_adj"] = df.apply(
-        lambda x: x["haber"] if x["exp_contable"] in exp_con_1101 else x["debe"],
+        lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
         axis=1
     )
     df["haber_adj"] = df.apply(
-        lambda x: x["debe"] if x["exp_contable"] in exp_con_1101 else x["haber"],
+        lambda x: x["debe"] if x["exp_contable"] not in exp_con_1101 else x["haber"],
         axis=1
     )
 
-    # Crear clave para equivalencias
-    df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
+    # Tipo1 con y sin 1101
+    df_tipo1 = df[df["tipo_ctb"] == "1"]
+    df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
+    df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
 
-    # Cargar equivalencias (Hoja de Trabajo)
-    df_equiv = pd.read_excel(equiv_file, sheet_name="Hoja de Trabajo")
-
-    # Normalizar valores
-    df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
-    df_equiv["Rubros"] = df_equiv["Rubros"].astype(str).str.strip()
-
-    # 🚨 Evitar duplicados que generan filas extra en el merge
-    df_equiv = df_equiv.drop_duplicates(subset=["Cuentas Contables"], keep="first")
-
-    # Merge con equivalencias
-    df = df.merge(
-        df_equiv[["Cuentas Contables", "Rubros"]],
-        left_on="clave_cta",
-        right_on="Cuentas Contables",
-        how="left"
-    )
-
-    # Crear Excel en memoria
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Guardar hoja original cargada
-        df_original = pd.read_excel(uploaded_file)
-        df_original.to_excel(writer, index=False, sheet_name="Original")
-
-        # Guardar resultado general con equivalencias
+    # Guardar resultados en Excel
+    with pd.ExcelWriter("resultado_final.xlsx", engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Resultado General")
-
-        # Filtrar tipo_ctb = 1 y separar en dos hojas
-        df_tipo1 = df[df["tipo_ctb"] == 1]
-
-        df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
-        df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
-
         df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
         df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
-        # 🚨 Procesar HT EF-4 existente
+        # 🚨 Procesar HT EF-4 ya existente
         try:
-            df_ht = pd.read_excel(equiv_file, sheet_name="HT EF-4")
+            # Leemos todas las filas sin encabezado
+            df_raw = pd.read_excel(equiv_file, sheet_name="HT EF-4", header=None)
+
+            # Buscar la fila donde está "DESCRIPCION"
+            header_row = df_raw.index[df_raw.apply(lambda r: r.astype(str).str.contains("DESCRIPCION", case=False).any(), axis=1)]
+            if not header_row.empty:
+                header_idx = header_row[0]
+                df_ht = pd.read_excel(equiv_file, sheet_name="HT EF-4", header=header_idx)
+            else:
+                raise ValueError("No se encontró la fila con 'DESCRIPCION' en HT EF-4")
 
             # Agrupar importes desde Tipo1_sin_1101
             resumen = df_tipo1_sin1101.groupby("Rubros").agg(
@@ -88,7 +72,10 @@ if uploaded_file and equiv_file:
                 ACREEDOR=("haber_adj", "sum")
             ).reset_index().rename(columns={"Rubros": "DESCRIPCION"})
 
-            # Merge con la hoja HT EF-4 existente
+            # Unir con HT EF-4
+            if "DESCRIPCION" not in df_ht.columns:
+                df_ht["DESCRIPCION"] = None
+
             df_ht = df_ht.merge(
                 resumen,
                 on="DESCRIPCION",
@@ -100,10 +87,5 @@ if uploaded_file and equiv_file:
         except Exception as e:
             st.warning(f"No se pudo procesar la hoja HT EF-4: {e}")
 
-    # Botón de descarga
-    st.download_button(
-        label="Descargar resultado en Excel",
-        data=output.getvalue(),
-        file_name="resultado_exp_contable.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.success("Archivo resultado_final.xlsx generado con éxito")
+    st.download_button("Descargar archivo procesado", data=open("resultado_final.xlsx", "rb").read(), file_name="resultado_final.xlsx")
