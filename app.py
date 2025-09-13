@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 import openpyxl
+from copy import copy
 
 st.title("Procesador de Exp Contable - SIAF")
 
@@ -71,24 +72,23 @@ if uploaded_file and equiv_file:
     # Crear Excel en memoria
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Guardar hoja original cargada (tipos ya ajustados)
+        # Guardar hoja original cargada
         df_original = pd.read_excel(uploaded_file, dtype=str)
         for col in ["debe", "haber", "saldo"]:
             if col in df_original.columns:
                 df_original[col] = pd.to_numeric(df_original[col], errors="coerce").fillna(0)
         df_original.to_excel(writer, index=False, sheet_name="Original")
 
-        # Guardar resultado general con equivalencias
+        # Guardar resultado general
         df.to_excel(writer, index=False, sheet_name="Resultado General")
 
-        # Filtrar tipo_ctb = 1 y separar en dos hojas
+        # Filtrar tipo_ctb = 1
         if "tipo_ctb" in df.columns:
             df_tipo1 = df[df["tipo_ctb"].astype(str) == "1"]
 
             df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)].copy()
             df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)].copy()
 
-            # Forzar tipos en ambas
             for dfx in [df_tipo1_con1101, df_tipo1_sin1101]:
                 for col in numeric_cols_result:
                     if col in dfx.columns:
@@ -100,7 +100,7 @@ if uploaded_file and equiv_file:
             df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
             df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
-        # === Copiar la hoja HT EF-4 conservando formato y agregar correlativo ===
+        # === Copiar la hoja HT EF-4 respetando estilos ===
         book_equiv = openpyxl.load_workbook(equiv_file)
         if "HT EF-4" in book_equiv.sheetnames:
             sheet_equiv = book_equiv["HT EF-4"]
@@ -111,15 +111,20 @@ if uploaded_file and equiv_file:
                 for cell in row:
                     new_cell = sheet_copy.cell(row=cell.row, column=cell.column, value=cell.value)
                     if cell.has_style:
-                        new_cell._style = cell._style
+                        new_cell.font = copy(cell.font)
+                        new_cell.border = copy(cell.border)
+                        new_cell.fill = copy(cell.fill)
+                        new_cell.number_format = copy(cell.number_format)
+                        new_cell.protection = copy(cell.protection)
+                        new_cell.alignment = copy(cell.alignment)
 
             # Copiar celdas combinadas
             for merged_cell_range in sheet_equiv.merged_cells.ranges:
                 sheet_copy.merge_cells(str(merged_cell_range))
 
-            # Insertar columna para correlativos (ajustes)
+            # Insertar columna correlativo
             max_row = sheet_copy.max_row
-            sheet_copy.insert_cols(1)  # nueva primera columna
+            sheet_copy.insert_cols(1)
             sheet_copy.cell(row=1, column=1, value="Correlativo Ajuste")
             for i in range(2, max_row + 1):
                 sheet_copy.cell(row=i, column=1, value=i - 1)
