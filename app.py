@@ -14,7 +14,7 @@ equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo
 
 if uploaded_file and equiv_file:
     # === Cargar archivo principal con control de tipos ===
-    df = pd.read_excel(uploaded_file, dtype=str)  # todo como texto inicialmente
+    df = pd.read_excel(uploaded_file, dtype=str)
 
     # Forzar numéricos en debe, haber y saldo
     for col in ["debe", "haber", "saldo"]:
@@ -42,7 +42,7 @@ if uploaded_file and equiv_file:
         axis=1
     )
 
-    # === Tipos en Resultado General ===
+    # Tipado final
     numeric_cols_result = ["debe_adj", "haber_adj", "debe", "haber", "saldo"]
     for col in numeric_cols_result:
         if col in df.columns:
@@ -52,7 +52,7 @@ if uploaded_file and equiv_file:
         if col not in numeric_cols_result:
             df[col] = df[col].astype(str)
 
-    # Crear clave para equivalencias
+    # Clave para equivalencias
     df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
     # Cargar equivalencias
@@ -61,7 +61,7 @@ if uploaded_file and equiv_file:
     df_equiv["Rubros"] = df_equiv["Rubros"].astype(str).str.strip()
     df_equiv = df_equiv.drop_duplicates(subset=["Cuentas Contables"], keep="first")
 
-    # Merge con equivalencias
+    # Merge
     df = df.merge(
         df_equiv[["Cuentas Contables", "Rubros"]],
         left_on="clave_cta",
@@ -69,10 +69,10 @@ if uploaded_file and equiv_file:
         how="left"
     )
 
-    # Crear Excel en memoria
+    # === CREAR ARCHIVO DE SALIDA ===
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Guardar hoja original cargada
+        # Guardar hoja original
         df_original = pd.read_excel(uploaded_file, dtype=str)
         for col in ["debe", "haber", "saldo"]:
             if col in df_original.columns:
@@ -101,7 +101,7 @@ if uploaded_file and equiv_file:
             df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
             df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
-        # === Copiar manualmente hoja HT EF-4 con estilos y sumar rubros ===
+        # === COPIAR HOJA HT EF-4 MANUALMENTE ===
         book_equiv = openpyxl.load_workbook(equiv_file)
         book_result = writer.book
 
@@ -125,20 +125,20 @@ if uploaded_file and equiv_file:
             for merged_range in sheet_equiv.merged_cells.ranges:
                 sheet_copy.merge_cells(str(merged_range))
 
-            # Agregar sumas por rubro en columnas G (7) y H (8)
-            if not df_tipo1_sin1101.empty and 'Rubros' in df_tipo1_sin1101.columns:
+            # Agregar sumas por rubro en columnas G y H
+            if not df_tipo1_sin1101.empty and "Rubros" in df_tipo1_sin1101.columns:
                 df_sum = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum().reset_index()
                 dict_debe = dict(zip(df_sum["Rubros"], df_sum["debe_adj"]))
                 dict_haber = dict(zip(df_sum["Rubros"], df_sum["haber_adj"]))
 
-                for row in sheet_copy.iter_rows(min_row=2):  # desde fila 2
+                for i, row in enumerate(sheet_copy.iter_rows(min_row=2), start=2):
                     rubro = str(row[1].value).strip() if row[1].value else ""
                     if rubro:
                         debe_sum = dict_debe.get(rubro, 0)
                         haber_sum = dict_haber.get(rubro, 0)
 
-                        sheet_copy.cell(row=row[0].row, column=7, value=debe_sum)   # Columna G
-                        sheet_copy.cell(row=row[0].row, column=8, value=haber_sum) # Columna H
+                        sheet_copy.cell(row=i, column=7, value=debe_sum)   # Columna G
+                        sheet_copy.cell(row=i, column=8, value=haber_sum)  # Columna H
 
     # Botón de descarga
     st.download_button(
