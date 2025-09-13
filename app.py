@@ -13,10 +13,9 @@ equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo
 
 if uploaded_file and equiv_file:
     # Cargar archivo principal
-    df = pd.read_excel(uploaded_file, dtype=str)
-    df = df.copy()
+    df = pd.read_excel(uploaded_file, dtype=str).copy()
 
-    # Normalizar columnas a minúsculas
+    # Normalizar columnas
     df.columns = df.columns.str.strip().str.lower()
 
     # Convertir campos numéricos
@@ -51,12 +50,8 @@ if uploaded_file and equiv_file:
 
     # Cargar equivalencias
     df_equiv = pd.read_excel(equiv_file, sheet_name="Hoja de Trabajo")
-
-    # Normalizar valores
     df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
     df_equiv["Rubros"] = df_equiv["Rubros"].astype(str).str.strip()
-
-    # Eliminar duplicados
     df_equiv = df_equiv.drop_duplicates(subset=["Cuentas Contables"], keep="first")
 
     # Merge con equivalencias
@@ -69,7 +64,6 @@ if uploaded_file and equiv_file:
 
     # Filtrar tipo_ctb = 1 y separar en dos hojas
     df_tipo1 = df[df["tipo_ctb"] == "1"]
-
     df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
     df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
 
@@ -96,21 +90,21 @@ if uploaded_file and equiv_file:
     # Guardar todo en memoria
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Guardar hoja original cargada
+        # Guardar hoja original
         df_original = pd.read_excel(uploaded_file)
         df_original.to_excel(writer, index=False, sheet_name="Original")
 
-        # Guardar resultado general con equivalencias
+        # Guardar resultado general
         df.to_excel(writer, index=False, sheet_name="Resultado General")
 
         # Guardar hojas filtradas
         df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
         df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
-        # Guardar copia de HT EF-4 actualizada como hoja Resultado_HT_EF4
+        # Guardar copia de HT EF-4 actualizada como hoja adicional
         if "HT EF-4" in wb_equiv.sheetnames:
             data_ht = pd.DataFrame(ws.values)
-            data_ht.to_excel(writer, index=False, header=False, sheet_name="Resultado_HT_EF4")
+            data_ht.to_excel(writer, index=False, header=False, sheet_name="HT EF-4")
 
     # Botón de descarga
     st.download_button(
