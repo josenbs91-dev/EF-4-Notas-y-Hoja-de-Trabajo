@@ -126,26 +126,32 @@ if uploaded_file and equiv_file:
                 sheet_copy.merge_cells(str(merged_range))
 
             # Agregar sumas por rubro en columnas G y H
+
             if not df_tipo1_sin1101.empty and "Rubros" in df_tipo1_sin1101.columns:
                 df_sum = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum().reset_index()
                 dict_debe = dict(zip(df_sum["Rubros"], df_sum["debe_adj"]))
                 dict_haber = dict(zip(df_sum["Rubros"], df_sum["haber_adj"]))
 
+                # Verifica si una celda está en una celda combinada
+                merged_ranges = sheet_copy.merged_cells.ranges
+
+                def is_merged_cell(row, col):
+                    for merged_range in merged_ranges:
+                        if (row, col) in merged_range.cells:
+                            return True
+                    return False
+
+                # Iterar sobre cada fila y escribir si la celda no está combinada
                 for i, row in enumerate(sheet_copy.iter_rows(min_row=2), start=2):
                     rubro = str(row[1].value).strip() if row[1].value else ""
                     if rubro:
                         debe_sum = dict_debe.get(rubro, 0)
                         haber_sum = dict_haber.get(rubro, 0)
 
-                        try:
-                            sheet_copy.cell(row=i, column=7, value=float(debe_sum))  # Columna G
-                        except:
-                            sheet_copy.cell(row=i, column=7, value=0.0)
-
-                        try:
-                            sheet_copy.cell(row=i, column=8, value=float(haber_sum))  # Columna H
-                        except:
-                            sheet_copy.cell(row=i, column=8, value=0.0)
+                        if not is_merged_cell(i, 7):
+                            sheet_copy.cell(row=i, column=7, value=float(debe_sum))
+                        if not is_merged_cell(i, 8):
+                            sheet_copy.cell(row=i, column=8, value=float(haber_sum))
 
     # Botón de descarga
     st.download_button(
