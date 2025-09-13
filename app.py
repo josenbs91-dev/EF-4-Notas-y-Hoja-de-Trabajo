@@ -13,8 +13,16 @@ equiv_file = st.file_uploader("Sube tu archivo de Equivalencias (Hoja de Trabajo
 
 if uploaded_file and equiv_file:
     # Cargar archivo principal
-    df = pd.read_excel(uploaded_file)
+    df = pd.read_excel(uploaded_file, dtype=str)
     df = df.copy()
+
+    # Normalizar columnas a minúsculas
+    df.columns = df.columns.str.strip().str.lower()
+
+    # Convertir campos numéricos
+    for col in ["debe", "haber", "saldo"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # Crear exp_contable
     df["exp_contable"] = (
@@ -25,20 +33,21 @@ if uploaded_file and equiv_file:
     )
 
     # Identificar exp_contables con mayor=1101
-    exp_con_1101 = df.loc[df["mayor"] == 1101, "exp_contable"].unique()
+    exp_con_1101 = df.loc[df["mayor"] == "1101", "exp_contable"].unique()
 
     # Crear columnas ajustadas
     df["debe_adj"] = df.apply(
-        lambda x: x["haber"] if x["exp_contable"] in exp_con_1101 else x["debe"],
+        lambda x: x["haber"] if x["exp_contable"] not in exp_con_1101 else x["debe"],
         axis=1
     )
     df["haber_adj"] = df.apply(
-        lambda x: x["debe"] if x["exp_contable"] in exp_con_1101 else x["haber"],
+        lambda x: x["debe"] if x["exp_contable"] not in exp_con_1101 else x["haber"],
         axis=1
     )
 
     # Crear clave para equivalencias
-    df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
+    if "mayor" in df.columns and "sub_cta" in df.columns:
+        df["clave_cta"] = df["mayor"].astype(str) + "." + df["sub_cta"].astype(str)
 
     # Cargar equivalencias
     df_equiv = pd.read_excel(equiv_file, sheet_name="Hoja de Trabajo")
@@ -47,7 +56,7 @@ if uploaded_file and equiv_file:
     df_equiv["Cuentas Contables"] = df_equiv["Cuentas Contables"].astype(str).str.strip()
     df_equiv["Rubros"] = df_equiv["Rubros"].astype(str).str.strip()
 
-    # Evitar duplicados
+    # Eliminar duplicados
     df_equiv = df_equiv.drop_duplicates(subset=["Cuentas Contables"], keep="first")
 
     # Merge con equivalencias
@@ -58,42 +67,50 @@ if uploaded_file and equiv_file:
         how="left"
     )
 
-    # Crear Excel en memoria
+    # Filtrar tipo_ctb = 1 y separar en dos hojas
+    df_tipo1 = df[df["tipo_ctb"] == "1"]
+
+    df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
+    df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
+
+    # Agrupación por Rubros desde Tipo1_sin_1101
+    resumen = df_tipo1_sin1101.groupby("Rubros").agg(
+        debe_total=("debe_adj", "sum"),
+        haber_total=("haber_adj", "sum")
+    ).reset_index()
+
+    # Cargar hoja HT EF-4 del archivo de equivalencias
+    wb_equiv = openpyxl.load_workbook(equiv_file)
+    if "HT EF-4" in wb_equiv.sheetnames:
+        ws = wb_equiv["HT EF-4"]
+
+        # Buscar Rubros en columna A y reemplazar en columnas F y G
+        for row in range(2, ws.max_row + 1):  # asumiendo encabezados en fila 1
+            rubro = str(ws.cell(row=row, column=1).value).strip()
+            if rubro in resumen["Rubros"].values:
+                valor_debe = resumen.loc[resumen["Rubros"] == rubro, "debe_total"].values[0]
+                valor_haber = resumen.loc[resumen["Rubros"] == rubro, "haber_total"].values[0]
+                ws.cell(row=row, column=6, value=valor_debe)  # Columna F
+                ws.cell(row=row, column=7, value=valor_haber)  # Columna G
+
+    # Guardar todo en memoria
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Guardar hoja original
+        # Guardar hoja original cargada
         df_original = pd.read_excel(uploaded_file)
         df_original.to_excel(writer, index=False, sheet_name="Original")
 
-        # Guardar resultado general
+        # Guardar resultado general con equivalencias
         df.to_excel(writer, index=False, sheet_name="Resultado General")
 
-        # Filtrar tipo_ctb = 1
-        df_tipo1 = df[df["tipo_ctb"] == 1]
-        df_tipo1_con1101 = df_tipo1[df_tipo1["exp_contable"].isin(exp_con_1101)]
-        df_tipo1_sin1101 = df_tipo1[~df_tipo1["exp_contable"].isin(exp_con_1101)]
-
+        # Guardar hojas filtradas
         df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
         df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
 
-    # --- Ahora actualizamos la hoja HT EF-4 del archivo de equivalencias ---
-    wb = openpyxl.load_workbook(equiv_file)
-    if "HT EF-4" in wb.sheetnames:
-        ws = wb["HT EF-4"]
-
-        # Agrupar debe_adj y haber_adj por Rubros desde Tipo1_sin_1101
-        totales = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum().reset_index()
-
-        # Recorrer la columna A de HT EF-4 (Rubros)
-        for row in range(2, ws.max_row + 1):  # Asumimos que fila 1 son encabezados
-            rubro = str(ws.cell(row=row, column=1).value).strip() if ws.cell(row=row, column=1).value else None
-            if rubro and rubro in totales["Rubros"].values:
-                fila = totales[totales["Rubros"] == rubro].iloc[0]
-                ws.cell(row=row, column=6, value=float(fila["debe_adj"]))   # Columna F
-                ws.cell(row=row, column=7, value=float(fila["haber_adj"]))  # Columna G
-
-        # Guardar cambios en memoria junto con lo demás
-        wb.save(output)
+        # Guardar copia de HT EF-4 actualizada como hoja Resultado_HT_EF4
+        if "HT EF-4" in wb_equiv.sheetnames:
+            data_ht = pd.DataFrame(ws.values)
+            data_ht.to_excel(writer, index=False, header=False, sheet_name="Resultado_HT_EF4")
 
     # Botón de descarga
     st.download_button(
