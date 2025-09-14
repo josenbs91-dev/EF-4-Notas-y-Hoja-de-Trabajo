@@ -302,12 +302,21 @@ def write_ht_ef4_estructura(
     ef2_acc_plus_map = ef2_acc_plus_map or {}
     ef2_acc_minus_map = ef2_acc_minus_map or {}
 
+    # ---------- Normalización para mapas ----------
     # Mapeo de Cuentas -> Rubros desde "Hoja de Trabajo" (con fallback normalizado)
     map_cta_to_rubro_raw = dict(zip(df_equiv_ht["Cuentas Contables"].astype(str).str.strip(),
                                     df_equiv_ht["Rubros"].astype(str).str.strip()))
     map_cta_to_rubro_norm = { _norm_account_code(k): v for k, v in map_cta_to_rubro_raw.items() }
     def _get_rubro_for_account(cta_code: str) -> str:
         return map_cta_to_rubro_raw.get(cta_code) or map_cta_to_rubro_norm.get(_norm_account_code(cta_code), MISSING_RUBRO_LABEL)
+
+    # Mapas Debe/Haber por cuenta (desde principal, tipo_ctb==1 sin 1101) + normalizados
+    acc_debe_map_norm = { _norm_account_code(k): v for k, v in (acc_debe_map or {}).items() }
+    acc_haber_map_norm = { _norm_account_code(k): v for k, v in (acc_haber_map or {}).items() }
+
+    # Mapas Debe/Haber por rubro (desde principal, tipo_ctb==1 sin 1101) + normalizados
+    rub_debe_map_norm = { _norm_text(k): v for k, v in (rub_debe_map or {}).items() }
+    rub_haber_map_norm = { _norm_text(k): v for k, v in (rub_haber_map or {}).items() }
 
     # Localizar hojas EF-1
     ap_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*apert"])
@@ -365,15 +374,16 @@ def write_ht_ef4_estructura(
         var_plus += ef2_plus
         var_minus += ef2_minus
 
-        # Debe/Haber (HT) por cuenta (del archivo principal)
-        debe_ht = float(acc_debe_map.get(cta, 0.0))
-        haber_ht = float(acc_haber_map.get(cta, 0.0))
+        # Debe/Haber (HT) por cuenta (BUSCA NORMALIZADO EN TIPO1_sin_1101)
+        debe_ht = float(acc_debe_map.get(cta, acc_debe_map_norm.get(_norm_account_code(cta), 0.0)))
+        haber_ht = float(acc_haber_map.get(cta, acc_haber_map_norm.get(_norm_account_code(cta), 0.0)))
 
         # Saldos Ajustados por cuenta
         saldo_aj = fi_val + var_plus - ap_val - var_minus
 
         rows_data.append({
             "Rubros": rub,
+            "Rubros_norm": _norm_text(rub),
             "Cuenta Contable": cta,
             "EF-1 Final": fi_val,
             "EF-1 Apertura": ap_val,
@@ -457,14 +467,15 @@ def write_ht_ef4_estructura(
         if MISSING_RUBRO_LABEL not in rubros_order:
             rubros_order.append(MISSING_RUBRO_LABEL)
 
-    # Totales por rubro (YA incluyen EF-2 por cuenta)
-    totals = (
-        df_all.groupby("Rubros")[["EF-1 Final", "EF-1 Apertura", "Variación +", "Variación -", "Saldos Ajustados"]]
+    # Totales por rubro (YA incluyen EF-2 por cuenta) agrupando por rubro normalizado
+    df_all["_rub_norm"] = df_all["Rubros_norm"]
+    totals_norm = (
+        df_all.groupby("_rub_norm")[["EF-1 Final", "EF-1 Apertura", "Variación +", "Variación -", "Saldos Ajustados"]]
         .sum(numeric_only=True)
         .to_dict()
     )
 
-    # --- Construcción del layout final (B..J)
+    # --- Construcción del layout final (B..J) usando match normalizado de rubro ---
     header = [
         "", "Rubro", "Cuenta Contable",
         "EF-1 Final", "EF-1 Apertura", "Variación +", "Variación -",
@@ -472,14 +483,21 @@ def write_ht_ef4_estructura(
     ]
     out_rows = [header]
     for rub in rubros_order:
+        rub_norm = _norm_text(rub)
         out_rows.append(["", rub, "", "", "", "", "", "", "", ""])  # fila Rubro
-        block = df_all[df_all["Rubros"].astype(str).str.strip() == str(rub)]
+
+        block = df_all[df_all["_rub_norm"] == rub_norm].copy()
         block = block.sort_values(["Cuenta Contable"]).drop_duplicates(subset=["Cuenta Contable"], keep="first")
         if block.empty:
-            out_rows.append(["", "", "(sin cuentas)", 0.0, 0.0, 0.0, 0.0,
-                             float(rub_debe_map.get(rub, 0.0)), float(rub_haber_map.get(rub, 0.0)), 0.0])
+            # Debe/Haber por rubro (desde maps, match normalizado)
+            debe_r = float(rub_debe_map.get(rub, rub_debe_map_norm.get(rub_norm, 0.0)))
+            haber_r = float(rub_haber_map.get(rub, rub_haber_map_norm.get(rub_norm, 0.0)))
+            out_rows.append(["", "", "(sin cuentas)", 0.0, 0.0, 0.0, 0.0, debe_r, haber_r, 0.0])
         else:
             for _, r in block.iterrows():
+                # Debe/Haber por cuenta (preferir normalizado)
+                debe_ht = float(acc_debe_map.get(r["Cuenta Contable"], acc_debe_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0)))
+                haber_ht = float(acc_haber_map.get(r["Cuenta Contable"], acc_haber_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0)))
                 out_rows.append([
                     "", "",
                     r["Cuenta Contable"],
@@ -487,8 +505,8 @@ def write_ht_ef4_estructura(
                     float(r["EF-1 Apertura"]),
                     float(r["Variación +"]),
                     float(r["Variación -"]),
-                    float(r["Debe (HT EF-4)"]),
-                    float(r["Haber (HT EF-4)"]),
+                    debe_ht,
+                    haber_ht,
                     float(r["Saldos Ajustados"]),
                 ])
         out_rows.append(["", "", "", "", "", "", "", "", "", ""])  # línea en blanco
@@ -496,7 +514,7 @@ def write_ht_ef4_estructura(
     out_df = pd.DataFrame(out_rows[1:], columns=out_rows[0])
     out_df.to_excel(writer, index=False, sheet_name=sheet_name)
 
-    # --------- FORMATO + Totales por Rubro ---------
+    # --------- FORMATO + Totales por Rubro (match normalizado) ---------
     ws = writer.book[sheet_name]
     max_row = ws.max_row
 
@@ -522,7 +540,7 @@ def write_ht_ef4_estructura(
             ws.cell(row=r, column=c).number_format = '#,##0.00'
             ws.cell(row=r, column=c).alignment = num_align
 
-    # Fila Rubro (col B con texto y col C vacía) + totales (de 'totals' que ya incluyen EF-2)
+    # Fila Rubro (col B con texto y col C vacía) + totales (usando dict normalizado)
     rubro_fill = PatternFill("solid", fgColor="FFF7F7F7")
     rubro_font = Font(bold=True)
     for r in range(2, max_row + 1):
@@ -530,18 +548,20 @@ def write_ht_ef4_estructura(
         c = ws.cell(row=r, column=3).value
         if (b is not None and str(b).strip() != "") and (c is None or str(c).strip() == ""):
             rub = str(b).strip()
+            rub_norm = _norm_text(rub)
             # Estilo
             for col in range(2, 11):
                 ws.cell(row=r, column=col).fill = rubro_fill
             ws.cell(row=r, column=2).font = rubro_font
-            # Totales (ya incluyen EF-2 por cuenta)
-            ws.cell(row=r, column=4, value=float(totals.get("EF-1 Final", {}).get(rub, 0.0))).font = rubro_font
-            ws.cell(row=r, column=5, value=float(totals.get("EF-1 Apertura", {}).get(rub, 0.0))).font = rubro_font
-            ws.cell(row=r, column=6, value=float(totals.get("Variación +", {}).get(rub, 0.0))).font = rubro_font
-            ws.cell(row=r, column=7, value=float(totals.get("Variación -", {}).get(rub, 0.0))).font = rubro_font
-            ws.cell(row=r, column=8, value=float(rub_debe_map.get(rub, 0.0))).font = rubro_font
-            ws.cell(row=r, column=9, value=float(rub_haber_map.get(rub, 0.0))).font = rubro_font
-            ws.cell(row=r, column=10, value=float(totals.get("Saldos Ajustados", {}).get(rub, 0.0))).font = rubro_font
+            # Totales (incluyen EF-2 por cuenta, dict normalizado)
+            ws.cell(row=r, column=4, value=float(totals_norm.get("EF-1 Final", {}).get(rub_norm, 0.0))).font = rubro_font
+            ws.cell(row=r, column=5, value=float(totals_norm.get("EF-1 Apertura", {}).get(rub_norm, 0.0))).font = rubro_font
+            ws.cell(row=r, column=6, value=float(totals_norm.get("Variación +", {}).get(rub_norm, 0.0))).font = rubro_font
+            ws.cell(row=r, column=7, value=float(totals_norm.get("Variación -", {}).get(rub_norm, 0.0))).font = rubro_font
+            # Debe/Haber por rubro (desde Tipo1_sin_1101; match normalizado)
+            ws.cell(row=r, column=8, value=float(rub_debe_map.get(rub, rub_debe_map_norm.get(rub_norm, 0.0)))).font = rubro_font
+            ws.cell(row=r, column=9, value=float(rub_haber_map.get(rub, rub_haber_map_norm.get(rub_norm, 0.0)))).font = rubro_font
+            ws.cell(row=r, column=10, value=float(totals_norm.get("Saldos Ajustados", {}).get(rub_norm, 0.0))).font = rubro_font
 
     # Bordes finos en B1:Jmax
     thin = Side(style="thin", color="FFBFBFBF")
@@ -555,15 +575,15 @@ def write_ht_ef4_estructura(
     cols_sum = ["EF-1 Final","EF-1 Apertura","Variación +","Variación -","Debe (HT EF-4)","Haber (HT EF-4)","Saldos Ajustados"]
     tot_cuentas = {col: float(df_all[col].sum()) for col in cols_sum}
 
-    # 2) Totales por RUBROS (suma de las filas de rubro / mapas)
+    # 2) Totales por RUBROS (desde dict normalizado + maps normalizados)
     tot_rubros = {
-        "EF-1 Final": sum((totals.get("EF-1 Final", {}) or {}).values()),
-        "EF-1 Apertura": sum((totals.get("EF-1 Apertura", {}) or {}).values()),
-        "Variación +": sum((totals.get("Variación +", {}) or {}).values()),
-        "Variación -": sum((totals.get("Variación -", {}) or {}).values()),
-        "Saldos Ajustados": sum((totals.get("Saldos Ajustados", {}) or {}).values()),
-        "Debe (HT EF-4)": float(sum((rub_debe_map or {}).values())),
-        "Haber (HT EF-4)": float(sum((rub_haber_map or {}).values())),
+        "EF-1 Final": sum((totals_norm.get("EF-1 Final", {}) or {}).values()),
+        "EF-1 Apertura": sum((totals_norm.get("EF-1 Apertura", {}) or {}).values()),
+        "Variación +": sum((totals_norm.get("Variación +", {}) or {}).values()),
+        "Variación -": sum((totals_norm.get("Variación -", {}) or {}).values()),
+        "Saldos Ajustados": sum((totals_norm.get("Saldos Ajustados", {}) or {}).values()),
+        "Debe (HT EF-4)": float(sum((rub_debe_map_norm or {}).values())),
+        "Haber (HT EF-4)": float(sum((rub_haber_map_norm or {}).values())),
     }
 
     # 3) Diferencia (Rubros - Cuentas)
@@ -746,7 +766,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
                 writer, index=False, sheet_name="Avisos"
             )
 
-        # 4) Copiar hoja HT EF-4 original desde Equivalencias y escribir G/H por Rubro
+        # 4) Copiar hoja HT EF-4 original desde Equivalencias y escribir G/H por Rubro (match normalizado)
         book_equiv = openpyxl.load_workbook(BytesIO(equiv_bytes))
         if COPIABLE_SHEET in book_equiv.sheetnames:
             src_ws = book_equiv[COPIABLE_SHEET]
@@ -755,8 +775,10 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
 
             # Mapas de Debe/Haber (HT) por rubro/cta
             acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
+            rub_debe_map_norm = { _norm_text(k): v for k, v in (rub_debe_map or {}).items() }
+            rub_haber_map_norm = { _norm_text(k): v for k, v in (rub_haber_map or {}).items() }
 
-            # --- Sumas por Rubro (G = Debe, H = Haber) ---
+            # --- Sumas por Rubro (G = Debe, H = Haber) con normalización de rótulos del template ---
             if not df_tipo1_sin1101.empty and "Rubros" in df_tipo1_sin1101.columns:
                 merged_ranges = dst_ws.merged_cells.ranges
                 for i, row in enumerate(dst_ws.iter_rows(min_row=2), start=2):
@@ -764,8 +786,9 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
                     rubro = str(rubro_val).strip() if rubro_val is not None else ""
                     if not rubro:
                         continue
-                    debe_sum = float(rub_debe_map.get(rubro, 0.0))
-                    haber_sum = float(rub_haber_map.get(rubro, 0.0))
+                    rnorm = _norm_text(rubro)
+                    debe_sum = float(rub_debe_map.get(rubro, rub_debe_map_norm.get(rnorm, 0.0)))
+                    haber_sum = float(rub_haber_map.get(rubro, rub_haber_map_norm.get(rnorm, 0.0)))
                     if not is_inside_merged_area(i, 7, merged_ranges):
                         dst_ws.cell(row=i, column=7, value=debe_sum).number_format = '#,##0.00'
                     if not is_inside_merged_area(i, 8, merged_ranges):
