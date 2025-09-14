@@ -189,13 +189,14 @@ def write_ht_ef_4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
     dump_section("EF-1 Final", fi_name)
 
 # =============================
-# (2) HT EF-4 (Estructura) + Totales por Rubro
+# (2) HT EF-4 (Estructura) + Variaciones y Totales por Rubro
 # =============================
 def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame, sheet_name: str = "HT EF-4 (Estructura)"):
     map_cta_to_rubro = dict(zip(df_equiv_ht["Cuentas Contables"], df_equiv_ht["Rubros"]))
     ap_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*apert"])
     fi_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*final"])
 
+    # --- Lectura de importes por cuenta (Apertura / Final) ---
     def read_importes(sheet_name: str) -> pd.DataFrame:
         if not sheet_name:
             return pd.DataFrame(columns=["Cuenta", "Importe"])
@@ -213,22 +214,42 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
     ap_df = read_importes(ap_name)
     fi_df = read_importes(fi_name)
 
+    # --- Consolidado base
     cuentas = sorted(set(ap_df["Cuenta"]).union(set(fi_df["Cuenta"])))
-    data = []
+    rows_data = []
     for cta in cuentas:
         rub = map_cta_to_rubro.get(cta, "")
         ap_val = float(ap_df.loc[ap_df["Cuenta"] == cta, "Importe"].sum()) if not ap_df.empty else 0.0
         fi_val = float(fi_df.loc[fi_df["Cuenta"] == cta, "Importe"].sum()) if not fi_df.empty else 0.0
-        data.append({"Rubros": rub, "Cuenta Contable": cta, "EF-1 Apertura": ap_val, "EF-1 Final": fi_val})
+        # diff y variaciones
+        diff = fi_val - ap_val
+        starts = str(cta).strip()[:1]
+        if starts == "1":
+            var_plus = max(diff, 0.0)
+            var_minus = abs(min(diff, 0.0))
+        elif starts in {"2", "3"}:
+            var_plus = abs(min(diff, 0.0))
+            var_minus = max(diff, 0.0)
+        else:
+            var_plus = 0.0
+            var_minus = 0.0
+        rows_data.append({
+            "Rubros": rub,
+            "Cuenta Contable": cta,
+            "EF-1 Final": fi_val,        # <- primero
+            "EF-1 Apertura": ap_val,     # <- luego
+            "Variación +": var_plus,
+            "Variación -": var_minus,
+        })
 
-    df_all = pd.DataFrame(data)
+    df_all = pd.DataFrame(rows_data)
     if df_all.empty:
         pd.DataFrame({"info": ["No se pudieron consolidar Importes de EF-1 Apertura/Final."]}).to_excel(
             writer, index=False, sheet_name=sheet_name
         )
         return
 
-    # === Orden estricto desde "Estructura del archivo" ===
+    # === Orden estricto desde "Estructura del archivo"
     def struct_order_strict() -> list | None:
         struct_name = _find_sheet_name(equiv_bytes, [r"estructura.*archivo", r"estructura"])
         if not struct_name:
@@ -265,83 +286,91 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
     else:
         rubros_order = sorted(set(df_all["Rubros"].astype(str).str.strip().unique()))
 
-    # --- Construcción del layout base ---
-    rows = []
-    rows.append(["", "Rubro", "Cuenta Contable", "EF-1 Apertura", "EF-1 Final"])
+    # Totales por rubro (para escribir en la fila del rubro)
+    totals = (
+        df_all.groupby("Rubros")[["EF-1 Final", "EF-1 Apertura", "Variación +", "Variación -"]]
+        .sum(numeric_only=True)
+        .to_dict()
+    )
+
+    # --- Construcción del layout final
+    # Encabezado: B..G
+    header = ["", "Rubro", "Cuenta Contable", "EF-1 Final", "EF-1 Apertura", "Variación +", "Variación -"]
+    out_rows = [header]
     for rub in rubros_order:
-        rows.append(["", rub, "", "", ""])
+        out_rows.append(["", rub, "", "", "", "", ""])  # fila Rubro
         block = df_all[df_all["Rubros"].astype(str).str.strip() == str(rub)]
         block = block.sort_values(["Cuenta Contable"]).drop_duplicates(subset=["Cuenta Contable"], keep="first")
         if block.empty:
-            rows.append(["", "", "(sin cuentas)", 0.0, 0.0])
+            out_rows.append(["", "", "(sin cuentas)", 0.0, 0.0, 0.0, 0.0])
         else:
             for _, r in block.iterrows():
-                rows.append(["", "", r["Cuenta Contable"], float(r["EF-1 Apertura"]), float(r["EF-1 Final"])])
-        rows.append(["", "", "", "", ""])
+                out_rows.append([
+                    "", "",
+                    r["Cuenta Contable"],
+                    float(r["EF-1 Final"]),
+                    float(r["EF-1 Apertura"]),
+                    float(r["Variación +"]),
+                    float(r["Variación -"]),
+                ])
+        out_rows.append(["", "", "", "", "", "", ""])  # línea en blanco
 
-    out_df = pd.DataFrame(rows[1:], columns=rows[0])
+    out_df = pd.DataFrame(out_rows[1:], columns=out_rows[0])
     out_df.to_excel(writer, index=False, sheet_name=sheet_name)
 
-    # --------- FORMATO y TOTALES por Rubro ---------
+    # --------- FORMATO + Totales por Rubro en la fila de Rubro ---------
     ws = writer.book[sheet_name]
     max_row = ws.max_row
 
-    # Anchuras
-    widths = {2: 42, 3: 22, 4: 18, 5: 18}
+    # Anchos: B..G
+    widths = {2: 42, 3: 22, 4: 18, 5: 18, 6: 16, 7: 16}
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
+    # Encabezado
     header_font = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="FFEFEFEF")
     center = Alignment(horizontal="center", vertical="center")
-    for c in range(2, 6):
+    for c in range(2, 8):  # B..G
         cell = ws.cell(row=1, column=c)
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = center
 
+    # Números en D..G
     num_align = Alignment(horizontal="right")
     for r in range(2, max_row + 1):
-        for c in [4, 5]:
+        for c in [4, 5, 6, 7]:
             ws.cell(row=r, column=c).number_format = '#,##0.00'
             ws.cell(row=r, column=c).alignment = num_align
 
+    # Fila Rubro (col B con texto y col C vacía) + totales
     rubro_fill = PatternFill("solid", fgColor="FFF7F7F7")
     rubro_font = Font(bold=True)
-
-    # Precalcular totales por rubro
-    tot = (
-        df_all.groupby("Rubros")[["EF-1 Apertura", "EF-1 Final"]]
-        .sum(numeric_only=True)
-        .to_dict()
-    )
-    tot_ap = tot.get("EF-1 Apertura", {})
-    tot_fi = tot.get("EF-1 Final", {})
-
     for r in range(2, max_row + 1):
         b = ws.cell(row=r, column=2).value
         c = ws.cell(row=r, column=3).value
         if (b is not None and str(b).strip() != "") and (c is None or str(c).strip() == ""):
-            # Fila de Rubro
-            for col in range(2, 6):
+            # Estilo
+            for col in range(2, 8):
                 ws.cell(row=r, column=col).fill = rubro_fill
             ws.cell(row=r, column=2).font = rubro_font
-
+            # Totales
             rub = str(b).strip()
-            ap_val = float(tot_ap.get(rub, 0.0))
-            fi_val = float(tot_fi.get(rub, 0.0))
-            ws.cell(row=r, column=4, value=ap_val)
-            ws.cell(row=r, column=5, value=fi_val)
-            ws.cell(row=r, column=4).font = rubro_font
-            ws.cell(row=r, column=5).font = rubro_font
+            ws.cell(row=r, column=4, value=float(totals.get("EF-1 Final", {}).get(rub, 0.0))).font = rubro_font
+            ws.cell(row=r, column=5, value=float(totals.get("EF-1 Apertura", {}).get(rub, 0.0))).font = rubro_font
+            ws.cell(row=r, column=6, value=float(totals.get("Variación +", {}).get(rub, 0.0))).font = rubro_font
+            ws.cell(row=r, column=7, value=float(totals.get("Variación -", {}).get(rub, 0.0))).font = rubro_font
 
+    # Bordes finos en B1:Gmax
     thin = Side(style="thin", color="FFBFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     for r in range(1, max_row + 1):
-        for c in range(2, 6):
+        for c in range(2, 8):
             ws.cell(row=r, column=c).border = border
 
-    ws.auto_filter.ref = f"B1:E{max_row}"
+    # Autofiltro y freeze panes
+    ws.auto_filter.ref = f"B1:G{max_row}"
     ws.freeze_panes = "B2"
 
 # =============================
@@ -387,7 +416,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
         # 2) Resultado General
         df_result.to_excel(writer, index=False, sheet_name="Resultado General")
 
-        # 3) Particiones tipo_ctb (y conservar df_tipo1_sin1101 para sumar en G/H)
+        # 3) Particiones tipo_ctb (guardar df_tipo1_sin1101 para sumas G/H)
         df_tipo1_sin1101 = pd.DataFrame()
         if "tipo_ctb" in df_result.columns:
             df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
@@ -410,7 +439,6 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
 
             # --- Sumas por Rubro (G = Debe, H = Haber) desde df_tipo1_sin1101 ---
             if (not df_tipo1_sin1101.empty) and ("Rubros" in df_tipo1_sin1101.columns):
-                # asegurar numéricos
                 for col in ["debe_adj", "haber_adj"]:
                     if col in df_tipo1_sin1101.columns:
                         df_tipo1_sin1101[col] = pd.to_numeric(df_tipo1_sin1101[col], errors="coerce").fillna(0.0)
@@ -423,9 +451,8 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
                 dict_haber = dict(zip(df_sum["Rubros"], df_sum["haber_adj"]))
 
                 merged_ranges = dst_ws.merged_cells.ranges
-                # Col B = Rubro, Col G(7) y H(8) para escribir
                 for i, row in enumerate(dst_ws.iter_rows(min_row=2), start=2):
-                    rubro_val = row[1].value  # B
+                    rubro_val = row[1].value  # col B
                     rubro = str(rubro_val).strip() if rubro_val is not None else ""
                     if not rubro:
                         continue
