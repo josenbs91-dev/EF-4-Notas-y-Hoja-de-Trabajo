@@ -100,31 +100,53 @@ def merge_equivalences(df: pd.DataFrame, df_equiv: pd.DataFrame) -> pd.DataFrame
 def build_simple_excel(main_bytes: bytes, df_result: pd.DataFrame) -> BytesIO:
     """Genera un Excel liviano con hojas: Original, Resultado General y particiones tipo_ctb."""
     output = BytesIO()
-    # Usamos xlsxwriter por velocidad (no copia estilos)
-    with pd.ExcelWriter(output, engine="xlsxwriter", options={"constant_memory": True}) as writer:
-        # Hoja Original (sin coerción extra para velocidad)
-        df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
-        df_original.to_excel(writer, index=False, sheet_name="Original")
 
-        # Resultado General
-        df_result.to_excel(writer, index=False, sheet_name="Resultado General")
+    # ⚠️ Importante: NO pasar 'options' al ExcelWriter (evita el error reportado)
+    # Requiere tener instalado 'xlsxwriter' para mejor rendimiento de escritura.
+    try:
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            # Hoja Original (sin coerción extra para velocidad)
+            df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
+            df_original.to_excel(writer, index=False, sheet_name="Original")
 
-        # Particiones tipo_ctb == 1
-        if "tipo_ctb" in df_result.columns:
-            df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
+            # Resultado General
+            df_result.to_excel(writer, index=False, sheet_name="Resultado General")
 
-            in_1101 = df_tipo1["exp_contable"].isin(
-                set(df_result.loc[df_result.get("mayor", "").astype(str).eq("1101"), "exp_contable"].unique())
-            )
-            df_tipo1_con1101 = df_tipo1[in_1101].copy()
-            df_tipo1_sin1101 = df_tipo1[~in_1101].copy()
+            # Particiones tipo_ctb == 1
+            if "tipo_ctb" in df_result.columns:
+                df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
 
-            df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
-            df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
-        else:
-            pd.DataFrame(
-                {"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}
-            ).to_excel(writer, index=False, sheet_name="Avisos")
+                in_1101 = df_tipo1["exp_contable"].isin(
+                    set(df_result.loc[df_result.get("mayor", "").astype(str).eq("1101"), "exp_contable"].unique())
+                )
+                df_tipo1_con1101 = df_tipo1[in_1101].copy()
+                df_tipo1_sin1101 = df_tipo1[~in_1101].copy()
+
+                df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
+                df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
+            else:
+                pd.DataFrame(
+                    {"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}
+                ).to_excel(writer, index=False, sheet_name="Avisos")
+    except Exception:
+        # Fallback: si no tienes xlsxwriter instalado, usa openpyxl
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
+            df_original.to_excel(writer, index=False, sheet_name="Original")
+            df_result.to_excel(writer, index=False, sheet_name="Resultado General")
+            if "tipo_ctb" in df_result.columns:
+                df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
+                in_1101 = df_tipo1["exp_contable"].isin(
+                    set(df_result.loc[df_result.get("mayor", "").astype(str).eq("1101"), "exp_contable"].unique())
+                )
+                df_tipo1_con1101 = df_tipo1[in_1101].copy()
+                df_tipo1_sin1101 = df_tipo1[~in_1101].copy()
+                df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
+                df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
+            else:
+                pd.DataFrame({"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}).to_excel(
+                    writer, index=False, sheet_name="Avisos"
+                )
 
     output.seek(0)
     return output
