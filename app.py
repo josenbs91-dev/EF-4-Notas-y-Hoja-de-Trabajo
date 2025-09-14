@@ -281,7 +281,7 @@ def _compute_ef2_variaciones_por_cuenta(equiv_bytes: bytes, df_equiv_ht: pd.Data
 
 # =============================
 # (2) HT EF-4 (Estructura) + Variaciones, Debe/Haber (HT) a nivel cuenta y Saldos Ajustados
-# (integra EF-2 en filas de cuenta) + Hoja de Auditoría
+# (integra EF-2 en filas de cuenta) + Hoja de Auditoría + Totales y Diferencia
 # =============================
 def write_ht_ef4_estructura(
     writer,
@@ -550,8 +550,78 @@ def write_ht_ef4_estructura(
         for c in range(2, 11):
             ws.cell(row=r, column=c).border = border
 
+    # --------- TOTALES GENERALES (al pie) ---------
+    # 1) Totales por CUENTAS (suma de todas las filas detalladas)
+    cols_sum = ["EF-1 Final","EF-1 Apertura","Variación +","Variación -","Debe (HT EF-4)","Haber (HT EF-4)","Saldos Ajustados"]
+    tot_cuentas = {col: float(df_all[col].sum()) for col in cols_sum}
+
+    # 2) Totales por RUBROS (suma de las filas de rubro / mapas)
+    tot_rubros = {
+        "EF-1 Final": sum((totals.get("EF-1 Final", {}) or {}).values()),
+        "EF-1 Apertura": sum((totals.get("EF-1 Apertura", {}) or {}).values()),
+        "Variación +": sum((totals.get("Variación +", {}) or {}).values()),
+        "Variación -": sum((totals.get("Variación -", {}) or {}).values()),
+        "Saldos Ajustados": sum((totals.get("Saldos Ajustados", {}) or {}).values()),
+        "Debe (HT EF-4)": float(sum((rub_debe_map or {}).values())),
+        "Haber (HT EF-4)": float(sum((rub_haber_map or {}).values())),
+    }
+
+    # 3) Diferencia (Rubros - Cuentas)
+    tot_diff = {k: float(tot_rubros.get(k,0.0) - tot_cuentas.get(k,0.0)) for k in cols_sum}
+
+    # Insertar filas al final
+    row_total_rub = ws.max_row + 1
+    row_total_cta = row_total_rub + 1
+    row_total_diff = row_total_cta + 1
+
+    total_fill = PatternFill("solid", fgColor="FFE9F5FF")
+    total_font = Font(bold=True)
+    diff_fill = PatternFill("solid", fgColor="FFFFF2CC")  # suave amarillo
+
+    # TOTAL RUBROS
+    ws.cell(row=row_total_rub, column=2, value="TOTAL RUBROS").font = total_font
+    ws.cell(row=row_total_rub, column=3, value="")
+    ws.cell(row=row_total_rub, column=4, value=tot_rubros["EF-1 Final"]).font = total_font
+    ws.cell(row=row_total_rub, column=5, value=tot_rubros["EF-1 Apertura"]).font = total_font
+    ws.cell(row=row_total_rub, column=6, value=tot_rubros["Variación +"]).font = total_font
+    ws.cell(row=row_total_rub, column=7, value=tot_rubros["Variación -"]).font = total_font
+    ws.cell(row=row_total_rub, column=8, value=tot_rubros["Debe (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_rub, column=9, value=tot_rubros["Haber (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_rub, column=10, value=tot_rubros["Saldos Ajustados"]).font = total_font
+
+    # TOTAL CUENTAS
+    ws.cell(row=row_total_cta, column=2, value="TOTAL CUENTAS").font = total_font
+    ws.cell(row=row_total_cta, column=3, value="")
+    ws.cell(row=row_total_cta, column=4, value=tot_cuentas["EF-1 Final"]).font = total_font
+    ws.cell(row=row_total_cta, column=5, value=tot_cuentas["EF-1 Apertura"]).font = total_font
+    ws.cell(row=row_total_cta, column=6, value=tot_cuentas["Variación +"]).font = total_font
+    ws.cell(row=row_total_cta, column=7, value=tot_cuentas["Variación -"]).font = total_font
+    ws.cell(row=row_total_cta, column=8, value=tot_cuentas["Debe (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_cta, column=9, value=tot_cuentas["Haber (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_cta, column=10, value=tot_cuentas["Saldos Ajustados"]).font = total_font
+
+    # TOTAL DIFERENCIA (Rubros - Cuentas)
+    ws.cell(row=row_total_diff, column=2, value="TOTAL DIFERENCIA (Rubros - Cuentas)").font = total_font
+    ws.cell(row=row_total_diff, column=3, value="")
+    ws.cell(row=row_total_diff, column=4, value=tot_diff["EF-1 Final"]).font = total_font
+    ws.cell(row=row_total_diff, column=5, value=tot_diff["EF-1 Apertura"]).font = total_font
+    ws.cell(row=row_total_diff, column=6, value=tot_diff["Variación +"]).font = total_font
+    ws.cell(row=row_total_diff, column=7, value=tot_diff["Variación -"]).font = total_font
+    ws.cell(row=row_total_diff, column=8, value=tot_diff["Debe (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_diff, column=9, value=tot_diff["Haber (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_diff, column=10, value=tot_diff["Saldos Ajustados"]).font = total_font
+
+    # Formatos numéricos, alineación y bordes en totales y diferencia
+    for rr, fill in [(row_total_rub, total_fill), (row_total_cta, total_fill), (row_total_diff, diff_fill)]:
+        for cc in [4,5,6,7,8,9,10]:
+            ws.cell(row=rr, column=cc).number_format = '#,##0.00'
+            ws.cell(row=rr, column=cc).alignment = num_align
+        for cc in range(2, 11):
+            ws.cell(row=rr, column=cc).fill = fill
+            ws.cell(row=rr, column=cc).border = border
+
     # Autofiltro y freeze panes
-    ws.auto_filter.ref = f"B1:J{max_row}"
+    ws.auto_filter.ref = f"B1:J{ws.max_row}"
     ws.freeze_panes = "B2"
 
     # --------- Hoja de Auditoría: cuentas sin rubro ---------
@@ -707,7 +777,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
         # 5) Hojas nuevas
         write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
 
-        # Para Estructura (con Debe/Haber por cuenta y EF-2 en filas de cuenta) + Auditoría
+        # Para Estructura (con Debe/Haber por cuenta y EF-2 en filas de cuenta) + Auditoría + Totales
         acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
         ef2_acc_plus_map, ef2_acc_minus_map = _compute_ef2_variaciones_por_cuenta(equiv_bytes, df_equiv_ht)
 
