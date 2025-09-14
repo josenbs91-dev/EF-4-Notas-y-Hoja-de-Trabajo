@@ -21,6 +21,7 @@ REQUIRED_FOR_EXP = ["ano_eje", "nro_not_exp", "ciclo", "fase"]
 NUMERIC_COLS = ["debe", "haber", "saldo"]
 EQUIV_SHEET = "Hoja de Trabajo"
 COPIABLE_SHEET = "HT EF-4"
+MISSING_RUBRO_LABEL = "(Sin Rubro)"
 
 # =============================
 # Utilidades / Helpers
@@ -134,6 +135,14 @@ def _norm_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
+def _norm_account_code(s: str) -> str:
+    s = str(s or "")
+    s = s.strip()
+    s = re.sub(r"\s+", "", s)        # quita espacios
+    s = re.sub(r"[^0-9.]", "", s)    # solo dígitos y puntos
+    s = re.sub(r"\.+", ".", s)       # colapsa .. en .
+    return s.strip(".")
+
 def _pick_col(df: pd.DataFrame, candidates: list[str], must_contain: str | None = None) -> str | None:
     cand_norm = {_norm_text(c) for c in candidates}
     for c in df.columns:
@@ -232,17 +241,16 @@ def write_ht_ef_4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
     dump_section("EF-1 Final", fi_name)
 
 # =============================
-# EF-2: Variaciones por CUENTA (desde hoja EF-2 Final) -> para integrarlas en filas de cuenta
+# EF-2: Variaciones POR CUENTA (desde hoja EF-2 Final) -> para integrarlas en filas de cuenta
 # =============================
 def _compute_ef2_variaciones_por_cuenta(equiv_bytes: bytes, df_equiv_ht: pd.DataFrame):
     """
-    Lee 'EF-2 Final' del archivo de equivalencias:
-    - Extrae 'Cuentas Contables' desde 'Cuenta_Nombre' (hasta el primer espacio).
-    - Agrupa importes por cuenta (abs).
-    - Clasifica por prefijo:
-        * '5' -> Variación + por CUENTA
-        * '4' -> Variación - por CUENTA
-    Retorna: (plus_by_account, minus_by_account) dicts
+    Lee 'EF-2 Final':
+      - Cuenta_Nombre -> primer token (antes del 1er espacio), p.ej.: '4104.010104 Arancel...' -> '4104.010104'
+      - Normaliza código de cuenta (solo dígitos y puntos)
+      - Agrupa importes por CUENTA normalizada (abs)
+      - Prefijo '5' -> Variación +, prefijo '4' -> Variación -
+    Retorna dicts por cuenta normalizada.
     """
     sheet = _find_sheet_name(equiv_bytes, [r"ef\s*2.*final"])
     if not sheet:
@@ -251,32 +259,29 @@ def _compute_ef2_variaciones_por_cuenta(equiv_bytes: bytes, df_equiv_ht: pd.Data
     df = pd.read_excel(BytesIO(equiv_bytes), sheet_name=sheet, dtype=str, engine="openpyxl")
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Detectar columnas
     cuenta_nombre_col = _pick_col(df, ["Cuenta_Nombre", "Cuenta Nombre", "CUENTA_NOMBRE", "Cuenta", "Descripción"], must_contain="cuenta")
     importe_col = _pick_col(df, ["Importe", "Importes", "Monto", "Valor", "Importe S/.", "Importe S"], must_contain="import")
     if cuenta_nombre_col is None or importe_col is None:
         return {}, {}
 
-    # Cuentas Contables = texto antes del primer espacio
-    cuentas = df[cuenta_nombre_col].astype(str).str.extract(r'^(\S+)')[0].fillna("").str.strip()
+    cuentas_raw = df[cuenta_nombre_col].astype(str).str.strip().str.split().str[0]  # primer token
+    cuentas = cuentas_raw.fillna("").map(_norm_account_code)
     importes = pd.to_numeric(df[importe_col], errors="coerce").fillna(0.0).abs()
 
     tmp = pd.DataFrame({"Cuenta": cuentas, "Importe": importes})
     tmp = tmp[tmp["Cuenta"] != ""].copy()
-
-    # Sumar por cuenta
     by_acc = tmp.groupby("Cuenta", as_index=False)["Importe"].sum()
 
     # Clasificación por prefijo
     by_acc["pref"] = by_acc["Cuenta"].str[:1]
-    plus_map = dict(zip(by_acc.loc[by_acc["pref"]=="5", "Cuenta"], by_acc.loc[by_acc["pref"]=="5", "Importe"]))
-    minus_map = dict(zip(by_acc.loc[by_acc["pref"]=="4", "Cuenta"], by_acc.loc[by_acc["pref"]=="4", "Importe"]))
+    plus_map = dict(zip(by_acc.loc[by_acc["pref"] == "5", "Cuenta"], by_acc.loc[by_acc["pref"] == "5", "Importe"]))
+    minus_map = dict(zip(by_acc.loc[by_acc["pref"] == "4", "Cuenta"], by_acc.loc[by_acc["pref"] == "4", "Importe"]))
 
     return plus_map, minus_map
 
 # =============================
 # (2) HT EF-4 (Estructura) + Variaciones, Debe/Haber (HT) a nivel cuenta y Saldos Ajustados
-# (ahora integra EF-2 en filas de cuenta)
+# (integra EF-2 en filas de cuenta) + Hoja de Auditoría
 # =============================
 def write_ht_ef4_estructura(
     writer,
@@ -297,14 +302,18 @@ def write_ht_ef4_estructura(
     ef2_acc_plus_map = ef2_acc_plus_map or {}
     ef2_acc_minus_map = ef2_acc_minus_map or {}
 
-    # Mapeo de Cuentas -> Rubros desde "Hoja de Trabajo"
-    map_cta_to_rubro = dict(zip(df_equiv_ht["Cuentas Contables"], df_equiv_ht["Rubros"]))
+    # Mapeo de Cuentas -> Rubros desde "Hoja de Trabajo" (con fallback normalizado)
+    map_cta_to_rubro_raw = dict(zip(df_equiv_ht["Cuentas Contables"].astype(str).str.strip(),
+                                    df_equiv_ht["Rubros"].astype(str).str.strip()))
+    map_cta_to_rubro_norm = { _norm_account_code(k): v for k, v in map_cta_to_rubro_raw.items() }
+    def _get_rubro_for_account(cta_code: str) -> str:
+        return map_cta_to_rubro_raw.get(cta_code) or map_cta_to_rubro_norm.get(_norm_account_code(cta_code), MISSING_RUBRO_LABEL)
 
     # Localizar hojas EF-1
     ap_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*apert"])
     fi_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*final"])
 
-    # --- Lectura de importes por cuenta (Apertura / Final) ---
+    # --- Lectura de importes por cuenta (Apertura / Final) NORMALIZANDO cuentas ---
     def read_importes(sheet_name: str) -> pd.DataFrame:
         if not sheet_name:
             return pd.DataFrame(columns=["Cuenta", "Importe"])
@@ -314,8 +323,10 @@ def write_ht_ef4_estructura(
         imp_col = _pick_col(df, ["Importes", "Importe", "Monto", "Valor", "Importe S/.", "Importe S"], must_contain="import")
         if not cta_col:
             return pd.DataFrame(columns=["Cuenta", "Importe"])
+        cuentas = df[cta_col].astype(str).map(_norm_account_code)
         vals = pd.to_numeric(df[imp_col], errors="coerce").fillna(0.0) if imp_col else 0.0
-        out = pd.DataFrame({"Cuenta": df[cta_col].astype(str).str.strip(), "Importe": vals})
+        out = pd.DataFrame({"Cuenta": cuentas, "Importe": vals})
+        out = out[out["Cuenta"] != ""]
         out = out.groupby("Cuenta", as_index=False)["Importe"].sum()
         return out
 
@@ -327,10 +338,11 @@ def write_ht_ef4_estructura(
     cuentas_ef2 = set(ef2_acc_plus_map.keys()).union(set(ef2_acc_minus_map.keys()))
     cuentas = sorted(cuentas_ef1.union(cuentas_ef2))
 
-    # --- Construcción por cuenta ---
+    # --- Construcción por cuenta + recolectar cuentas sin rubro para auditoría ---
+    audit_rows = []
     rows_data = []
     for cta in cuentas:
-        rub = map_cta_to_rubro.get(cta, "")
+        rub = _get_rubro_for_account(cta)
         ap_val = float(ap_df.loc[ap_df["Cuenta"] == cta, "Importe"].sum()) if not ap_df.empty else 0.0
         fi_val = float(fi_df.loc[fi_df["Cuenta"] == cta, "Importe"].sum()) if not fi_df.empty else 0.0
 
@@ -348,8 +360,10 @@ def write_ht_ef4_estructura(
             var_minus = 0.0
 
         # SUMA EF-2 a NIVEL CUENTA
-        var_plus += float(ef2_acc_plus_map.get(cta, 0.0))
-        var_minus += float(ef2_acc_minus_map.get(cta, 0.0))
+        ef2_plus = float(ef2_acc_plus_map.get(cta, 0.0))
+        ef2_minus = float(ef2_acc_minus_map.get(cta, 0.0))
+        var_plus += ef2_plus
+        var_minus += ef2_minus
 
         # Debe/Haber (HT) por cuenta (del archivo principal)
         debe_ht = float(acc_debe_map.get(cta, 0.0))
@@ -369,6 +383,17 @@ def write_ht_ef4_estructura(
             "Haber (HT EF-4)": haber_ht,
             "Saldos Ajustados": saldo_aj
         })
+
+        # Auditoría: si no hay rubro mapeado
+        if rub == MISSING_RUBRO_LABEL:
+            audit_rows.append({
+                "Cuenta Contable": cta,
+                "EF-1 Final": fi_val,
+                "EF-1 Apertura": ap_val,
+                "EF-2 Variación +": ef2_plus,
+                "EF-2 Variación -": ef2_minus,
+                "Observación": "Cuenta sin Rubro en Hoja de Trabajo"
+            })
 
     df_all = pd.DataFrame(rows_data)
     if df_all.empty:
@@ -426,6 +451,11 @@ def write_ht_ef4_estructura(
             # Último recurso: rubros presentes en df_all
             rubros_presentes = [str(x).strip() for x in df_all["Rubros"].astype(str).unique() if str(x).strip() != ""]
             rubros_order = sorted(rubros_presentes) if rubros_presentes else []
+
+    # Si hay cuentas bajo "(Sin Rubro)", agrega ese rubro al final
+    if MISSING_RUBRO_LABEL in set(df_all["Rubros"].astype(str)):
+        if MISSING_RUBRO_LABEL not in rubros_order:
+            rubros_order.append(MISSING_RUBRO_LABEL)
 
     # Totales por rubro (YA incluyen EF-2 por cuenta)
     totals = (
@@ -523,6 +553,15 @@ def write_ht_ef4_estructura(
     # Autofiltro y freeze panes
     ws.auto_filter.ref = f"B1:J{max_row}"
     ws.freeze_panes = "B2"
+
+    # --------- Hoja de Auditoría: cuentas sin rubro ---------
+    if audit_rows:
+        df_aud = pd.DataFrame(audit_rows)
+        # Consolidar por cuenta (por si aparece varias veces)
+        agg_cols = ["EF-1 Final", "EF-1 Apertura", "EF-2 Variación +", "EF-2 Variación -"]
+        df_aud = df_aud.groupby("Cuenta Contable", as_index=False)[agg_cols].sum(numeric_only=True)
+        df_aud["Observación"] = "Cuenta sin Rubro en Hoja de Trabajo"
+        df_aud.to_excel(writer, index=False, sheet_name="Auditoría (Sin Rubro)")
 
 # =============================
 # Exportadores (SIEMPRE openpyxl)
@@ -668,7 +707,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
         # 5) Hojas nuevas
         write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
 
-        # Para Estructura (con Debe/Haber por cuenta y EF-2 en filas de cuenta)
+        # Para Estructura (con Debe/Haber por cuenta y EF-2 en filas de cuenta) + Auditoría
         acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
         ef2_acc_plus_map, ef2_acc_minus_map = _compute_ef2_variaciones_por_cuenta(equiv_bytes, df_equiv_ht)
 
@@ -694,7 +733,7 @@ with opt_col1:
     copy_ht = st.checkbox(
         "Incluir copia de HT EF-4 (original, con estilos + sumas en G/H)",
         value=True,
-        help="Si no marcas esta opción, igual se crearán las hojas HT EF-4 (Compilada) y HT EF-4 (Estructura)."
+        help="Si no marcas esta opción, igual se crearán las hojas HT EF-4 (Compilada) y HT EF-4 (Estructura) con Auditoría."
     )
 with opt_col2:
     st.caption("El 2º archivo (Equivalencias) debe contener 'Hoja de Trabajo', 'EF-1 Apertura', 'EF-1 Final', opcional 'EF-2 Final' y preferible 'Estructura del archivo'.")
