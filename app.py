@@ -141,9 +141,9 @@ def _norm_text(s: str) -> str:
 def _norm_account_code(s: str) -> str:
     s = str(s or "")
     s = s.strip()
-    s = re.sub(r"\s+", "", s)        # quita espacios
-    s = re.sub(r"[^0-9.]", "", s)    # solo dígitos y puntos
-    s = re.sub(r"\.+", ".", s)       # colapsa .. en .
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"[^0-9.]", "", s)
+    s = re.sub(r"\.+", ".", s)
     return s.strip(".")
 
 def _pick_col(df: pd.DataFrame, candidates: list[str], must_contain: str | None = None) -> str | None:
@@ -178,7 +178,6 @@ def _find_structure_sheet_name(equiv_bytes: bytes) -> str | None:
             return name
         if "estruct" in n:
             candidates.append(name)
-    # Validar candidatos por columnas compatibles
     for name in candidates:
         try:
             df_test = pd.read_excel(BytesIO(equiv_bytes), sheet_name=name, dtype=str, engine="openpyxl", nrows=5)
@@ -200,7 +199,6 @@ def _find_estructura_ef4_sheet_name(equiv_bytes: bytes) -> str | None:
         n = _norm_text(name)
         if "estruct" in n and ("ef4" in n or "ef 4" in n or "ef-4" in n or "ef_4" in n):
             return name
-    # fallback: buscar un nombre que contenga "ef-4"
     for name in wb.sheetnames:
         n = _norm_text(name)
         if "ef-4" in n or "ef4" in n or "ef 4" in n or "ef_4" in n:
@@ -208,12 +206,10 @@ def _find_estructura_ef4_sheet_name(equiv_bytes: bytes) -> str | None:
     return None
 
 # =============================
-# (1) HT EF-4 (Compilada): EF-1 Apertura + EF-1 Final con columna "Rubros"
+# (1) HT EF-4 (Compilada)
 # =============================
 def write_ht_ef_4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame, sheet_name: str = "HT EF-4 (Compilada)"):
-    # Map Cuentas -> Rubros (desde "Hoja de Trabajo")
     map_cta_to_rubro = dict(zip(df_equiv_ht["Cuentas Contables"], df_equiv_ht["Rubros"]))
-
     ap_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*apert"])
     fi_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*final"])
 
@@ -240,35 +236,22 @@ def write_ht_ef_4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
             df_out["Rubros"] = df_out[cta_col].astype(str).map(map_cta_to_rubro).fillna("")
         else:
             df_out["Rubros"] = ""
-
-        # Escribir encabezados
         for j, col in enumerate(df_out.columns, start=1):
             ws.cell(row=row_ptr, column=j, value=col)
         row_ptr_local = row_ptr + 1
-
-        # Escribir datos
         for _, r in df_out.iterrows():
             for j, col in enumerate(df_out.columns, start=1):
                 ws.cell(row=row_ptr_local, column=j, value=str(r[col]) if pd.notna(r[col]) else "")
             row_ptr_local += 1
-
-        row_ptr = row_ptr_local + 1  # línea en blanco
+        row_ptr = row_ptr_local + 1
 
     dump_section("EF-1 Apertura", ap_name)
     dump_section("EF-1 Final", fi_name)
 
 # =============================
-# EF-2: Variaciones POR CUENTA (desde hoja EF-2 Final) -> para integrarlas en filas de cuenta
+# EF-2: Variaciones POR CUENTA (desde hoja EF-2 Final)
 # =============================
 def _compute_ef2_variaciones_por_cuenta(equiv_bytes: bytes, df_equiv_ht: pd.DataFrame):
-    """
-    Lee 'EF-2 Final':
-      - Cuenta_Nombre -> primer token (antes del 1er espacio), p.ej.: '4104.010104 Arancel...' -> '4104.010104'
-      - Normaliza código de cuenta (solo dígitos y puntos)
-      - Agrupa importes por CUENTA normalizada (abs)
-      - Prefijo '5' -> Variación +, prefijo '4' -> Variación -
-    Retorna dicts por cuenta normalizada.
-    """
     sheet = _find_sheet_name(equiv_bytes, [r"ef\s*2.*final"])
     if not sheet:
         return {}, {}
@@ -281,7 +264,7 @@ def _compute_ef2_variaciones_por_cuenta(equiv_bytes: bytes, df_equiv_ht: pd.Data
     if cuenta_nombre_col is None or importe_col is None:
         return {}, {}
 
-    cuentas_raw = df[cuenta_nombre_col].astype(str).str.strip().str.split().str[0]  # primer token
+    cuentas_raw = df[cuenta_nombre_col].astype(str).str.strip().str.split().str[0]
     cuentas = cuentas_raw.fillna("").map(_norm_account_code)
     importes = pd.to_numeric(df[importe_col], errors="coerce").fillna(0.0).abs()
 
@@ -289,7 +272,6 @@ def _compute_ef2_variaciones_por_cuenta(equiv_bytes: bytes, df_equiv_ht: pd.Data
     tmp = tmp[tmp["Cuenta"] != ""].copy()
     by_acc = tmp.groupby("Cuenta", as_index=False)["Importe"].sum()
 
-    # Clasificación por prefijo
     by_acc["pref"] = by_acc["Cuenta"].str[:1]
     plus_map = dict(zip(by_acc.loc[by_acc["pref"] == "5", "Cuenta"], by_acc.loc[by_acc["pref"] == "5", "Importe"]))
     minus_map = dict(zip(by_acc.loc[by_acc["pref"] == "4", "Cuenta"], by_acc.loc[by_acc["pref"] == "4", "Importe"]))
@@ -297,8 +279,7 @@ def _compute_ef2_variaciones_por_cuenta(equiv_bytes: bytes, df_equiv_ht: pd.Data
     return plus_map, minus_map
 
 # =============================
-# (2) HT EF-4 (Estructura) + Variaciones, Debe/Haber (HT) a nivel cuenta y Saldos Ajustados
-# (integra EF-2 en filas de cuenta) + Hoja de Auditoría + Totales y Diferencia
+# (2) HT EF-4 (Estructura)  ->  Totales al pie: Rubros, Cuentas y Diferencia
 # =============================
 def write_ht_ef4_estructura(
     writer,
@@ -319,7 +300,7 @@ def write_ht_ef4_estructura(
     ef2_acc_plus_map = ef2_acc_plus_map or {}
     ef2_acc_minus_map = ef2_acc_minus_map or {}
 
-    # Mapeo de Cuentas -> Rubros desde "Hoja de Trabajo" (con fallback normalizado)
+    # Mapeo de Cuentas -> Rubros desde "Hoja de Trabajo"
     map_cta_to_rubro_raw = dict(zip(df_equiv_ht["Cuentas Contables"].astype(str).str.strip(),
                                     df_equiv_ht["Rubros"].astype(str).str.strip()))
     map_cta_to_rubro_norm = { _norm_account_code(k): v for k, v in map_cta_to_rubro_raw.items() }
@@ -332,11 +313,10 @@ def write_ht_ef4_estructura(
     rub_debe_map_norm = { _norm_text(k): v for k, v in (rub_debe_map or {}).items() }
     rub_haber_map_norm = { _norm_text(k): v for k, v in (rub_haber_map or {}).items() }
 
-    # Localizar hojas EF-1
+    # Localizar EF-1
     ap_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*apert"])
     fi_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*final"])
 
-    # --- Lectura de importes por cuenta (Apertura / Final) NORMALIZANDO cuentas ---
     def read_importes(sheet_name: str) -> pd.DataFrame:
         if not sheet_name:
             return pd.DataFrame(columns=["Cuenta", "Importe"])
@@ -356,16 +336,13 @@ def write_ht_ef4_estructura(
     ap_df = read_importes(ap_name)
     fi_df = read_importes(fi_name)
 
-    # EF-2 POR CUENTA
-    ef2_acc_plus_map, ef2_acc_minus_map = (ef2_acc_plus_map or {}), (ef2_acc_minus_map or {})
-
-    # --- Conjunto de CUENTAS a mostrar (incluye EF-2 y TODAS las del principal Tipo1_sin_1101) ---
+    # Conjunto de CUENTAS a mostrar
     cuentas_ef1 = set(ap_df["Cuenta"]).union(set(fi_df["Cuenta"]))
-    cuentas_ef2 = set(ef2_acc_plus_map.keys()).union(set(ef2_acc_minus_map.keys()))
+    cuentas_ef2 = set((ef2_acc_plus_map or {}).keys()).union(set((ef2_acc_minus_map or {}).keys()))
     cuentas_main_norm = set(acc_debe_map_norm.keys()).union(set(acc_haber_map_norm.keys()))
     cuentas = sorted(cuentas_ef1.union(cuentas_ef2).union(cuentas_main_norm))
 
-    # --- Construcción por cuenta + auditoría ---
+    # Construcción por cuenta
     audit_rows = []
     rows_data = []
     for cta in cuentas:
@@ -373,7 +350,6 @@ def write_ht_ef4_estructura(
         ap_val = float(ap_df.loc[ap_df["Cuenta"] == cta, "Importe"].sum()) if not ap_df.empty else 0.0
         fi_val = float(fi_df.loc[fi_df["Cuenta"] == cta, "Importe"].sum()) if not fi_df.empty else 0.0
 
-        # Variaciones por prefijo de cuenta (modelo EF-1)
         diff = fi_val - ap_val
         starts = str(cta).strip()[:1]
         if starts == "1":
@@ -386,17 +362,15 @@ def write_ht_ef4_estructura(
             var_plus = 0.0
             var_minus = 0.0
 
-        # SUMA EF-2 a NIVEL CUENTA
-        ef2_plus = float(ef2_acc_plus_map.get(cta, 0.0))
-        ef2_minus = float(ef2_acc_minus_map.get(cta, 0.0))
+        ef2_plus = float((ef2_acc_plus_map or {}).get(cta, 0.0))
+        ef2_minus = float((ef2_acc_minus_map or {}).get(cta, 0.0))
         var_plus += ef2_plus
         var_minus += ef2_minus
 
-        # Debe/Haber (HT) por cuenta -> EXCLUSIVAMENTE Tipo1_sin_1101
         debe_ht = float(acc_debe_map_norm.get(_norm_account_code(cta), 0.0))
         haber_ht = float(acc_haber_map_norm.get(_norm_account_code(cta), 0.0))
 
-        # === Saldos Ajustados NUEVA DEFINICIÓN ===
+        # Saldos Ajustados (definición solicitada)
         saldo_aj = float(var_plus + debe_ht - var_minus - haber_ht)
 
         rows_data.append({
@@ -427,9 +401,9 @@ def write_ht_ef4_estructura(
         pd.DataFrame({"info": ["No se pudieron consolidar Importes de EF-1/EF-2."]}).to_excel(
             writer, index=False, sheet_name=sheet_name
         )
-        return df_all  # <-- devolver igualmente
+        return df_all
 
-    # === Orden estricto desde 'Estructura del archivo' (Rubros) ===
+    # Orden por 'Estructura del archivo' si existe
     def struct_order_strict() -> list | None:
         struct_name = _find_structure_sheet_name(equiv_bytes)
         if not struct_name:
@@ -488,7 +462,7 @@ def write_ht_ef4_estructura(
         .to_dict()
     )
 
-    # --- Construcción HT EF-4 (Estructura) ---
+    # --- Construcción de hoja ---
     header = [
         "", "Rubro", "Cuenta Contable",
         "EF-1 Final", "EF-1 Apertura", "Variación +", "Variación -",
@@ -502,10 +476,13 @@ def write_ht_ef4_estructura(
         block = df_all[df_all["_rub_norm"] == rub_norm].copy()
         block = block.sort_values(["Cuenta Contable"]).drop_duplicates(subset=["Cuenta Contable"], keep="first")
         if block.empty:
-            out_rows.append(["", "", "(sin cuentas)", 0.0, 0.0, 0.0, 0.0,
-                             0.0, 0.0, 0.0])
+            debe_r = float(rub_debe_map_norm.get(rub_norm, 0.0))
+            haber_r = float(rub_haber_map_norm.get(rub_norm, 0.0))
+            out_rows.append(["", "", "(sin cuentas)", 0.0, 0.0, 0.0, 0.0, debe_r, haber_r, 0.0])
         else:
             for _, r in block.iterrows():
+                debe_ht = float(acc_debe_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0))
+                haber_ht = float(acc_haber_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0))
                 out_rows.append([
                     "", "",
                     r["Cuenta Contable"],
@@ -513,8 +490,8 @@ def write_ht_ef4_estructura(
                     float(r["EF-1 Apertura"]),
                     float(r["Variación +"]),
                     float(r["Variación -"]),
-                    float(r["Debe (HT EF-4)"]),
-                    float(r["Haber (HT EF-4)"]),
+                    debe_ht,
+                    haber_ht,
                     float(r["Saldos Ajustados"]),
                 ])
         out_rows.append(["", "", "", "", "", "", "", "", "", ""])  # línea en blanco
@@ -522,7 +499,7 @@ def write_ht_ef4_estructura(
     out_df = pd.DataFrame(out_rows[1:], columns=out_rows[0])
     out_df.to_excel(writer, index=False, sheet_name=sheet_name)
 
-    # --------- FORMATO + Totales por Rubro ---------
+    # --------- FORMATO + Totales por Rubro (en fila de rubro) ---------
     ws = writer.book[sheet_name]
     max_row = ws.max_row
 
@@ -533,7 +510,7 @@ def write_ht_ef4_estructura(
     header_font = Font(bold=True)
     header_fill = PatternFill("solid", fgColor="FFEFEFEF")
     center = Alignment(horizontal="center", vertical="center")
-    for c in range(2, 11):  # B..J
+    for c in range(2, 11):
         cell = ws.cell(row=1, column=c)
         cell.font = header_font
         cell.fill = header_fill
@@ -563,32 +540,84 @@ def write_ht_ef4_estructura(
             ws.cell(row=r, column=5, value=float(totals_norm.get("EF-1 Apertura", {}).get(rub_norm, 0.0))).font = rubro_font
             ws.cell(row=r, column=6, value=float(totals_norm.get("Variación +", {}).get(rub_norm, 0.0))).font = rubro_font
             ws.cell(row=r, column=7, value=float(totals_norm.get("Variación -", {}).get(rub_norm, 0.0))).font = rubro_font
-            # Para vista, no reescribo Debe/Haber por rubro aquí (ya vienen por cuenta)
+            ws.cell(row=r, column=8, value=float(rub_debe_map_norm.get(rub_norm, 0.0))).font = rubro_font
+            ws.cell(row=r, column=9, value=float(rub_haber_map_norm.get(rub_norm, 0.0))).font = rubro_font
             ws.cell(row=r, column=10, value=float(totals_norm.get("Saldos Ajustados", {}).get(rub_norm, 0.0))).font = rubro_font
 
     for r in range(1, max_row + 1):
         for c in range(2, 11):
             ws.cell(row=r, column=c).border = border
 
-    # --------- TOTALES GENERALES (al pie) ---------
+    # --------- TOTALES GENERALES (al pie): Rubros, Cuentas, Diferencia ---------
     cols_sum = ["EF-1 Final","EF-1 Apertura","Variación +","Variación -","Debe (HT EF-4)","Haber (HT EF-4)","Saldos Ajustados"]
     tot_cuentas = {col: float(df_all[col].sum()) for col in cols_sum}
 
-    row_total_cta = ws.max_row + 1
+    # Totales Rubros (a partir de totals_norm y mapas de Debe/Haber por rubro)
+    tot_rubros = {
+        "EF-1 Final": sum((totals_norm.get("EF-1 Final", {}) or {}).values()),
+        "EF-1 Apertura": sum((totals_norm.get("EF-1 Apertura", {}) or {}).values()),
+        "Variación +": sum((totals_norm.get("Variación +", {}) or {}).values()),
+        "Variación -": sum((totals_norm.get("Variación -", {}) or {}).values()),
+        "Saldos Ajustados": sum((totals_norm.get("Saldos Ajustados", {}) or {}).values()),
+        "Debe (HT EF-4)": float(sum((rub_debe_map_norm or {}).values())),
+        "Haber (HT EF-4)": float(sum((rub_haber_map_norm or {}).values())),
+    }
+
+    tot_diff = {k: float(tot_rubros.get(k,0.0) - tot_cuentas.get(k,0.0)) for k in cols_sum}
+
+    row_total_rub = ws.max_row + 1
+    row_total_cta = row_total_rub + 1
+    row_total_diff = row_total_cta + 1
+
     total_fill = PatternFill("solid", fgColor="FFE9F5FF")
     total_font = Font(bold=True)
-    for col_idx, key in zip([4,5,6,7,8,9,10], cols_sum):
-        ws.cell(row=row_total_cta, column=col_idx, value=tot_cuentas[key]).font = total_font
-        ws.cell(row=row_total_cta, column=col_idx).number_format = '#,##0.00'
+    diff_fill = PatternFill("solid", fgColor="FFFFF2CC")
+
+    # TOTAL RUBROS
+    ws.cell(row=row_total_rub, column=2, value="TOTAL RUBROS").font = total_font
+    ws.cell(row=row_total_rub, column=3, value="")
+    ws.cell(row=row_total_rub, column=4, value=tot_rubros["EF-1 Final"]).font = total_font
+    ws.cell(row=row_total_rub, column=5, value=tot_rubros["EF-1 Apertura"]).font = total_font
+    ws.cell(row=row_total_rub, column=6, value=tot_rubros["Variación +"]).font = total_font
+    ws.cell(row=row_total_rub, column=7, value=tot_rubros["Variación -"]).font = total_font
+    ws.cell(row=row_total_rub, column=8, value=tot_rubros["Debe (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_rub, column=9, value=tot_rubros["Haber (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_rub, column=10, value=tot_rubros["Saldos Ajustados"]).font = total_font
+
+    # TOTAL CUENTAS
     ws.cell(row=row_total_cta, column=2, value="TOTAL CUENTAS").font = total_font
-    for c in range(2, 11):
-        ws.cell(row=row_total_cta, column=c).fill = total_fill
-        ws.cell(row=row_total_cta, column=c).border = border
+    ws.cell(row=row_total_cta, column=3, value="")
+    ws.cell(row=row_total_cta, column=4, value=tot_cuentas["EF-1 Final"]).font = total_font
+    ws.cell(row=row_total_cta, column=5, value=tot_cuentas["EF-1 Apertura"]).font = total_font
+    ws.cell(row=row_total_cta, column=6, value=tot_cuentas["Variación +"]).font = total_font
+    ws.cell(row=row_total_cta, column=7, value=tot_cuentas["Variación -"]).font = total_font
+    ws.cell(row=row_total_cta, column=8, value=tot_cuentas["Debe (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_cta, column=9, value=tot_cuentas["Haber (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_cta, column=10, value=tot_cuentas["Saldos Ajustados"]).font = total_font
+
+    # TOTAL DIFERENCIA
+    ws.cell(row=row_total_diff, column=2, value="TOTAL DIFERENCIA (Rubros - Cuentas)").font = total_font
+    ws.cell(row=row_total_diff, column=3, value="")
+    ws.cell(row=row_total_diff, column=4, value=tot_diff["EF-1 Final"]).font = total_font
+    ws.cell(row=row_total_diff, column=5, value=tot_diff["EF-1 Apertura"]).font = total_font
+    ws.cell(row=row_total_diff, column=6, value=tot_diff["Variación +"]).font = total_font
+    ws.cell(row=row_total_diff, column=7, value=tot_diff["Variación -"]).font = total_font
+    ws.cell(row=row_total_diff, column=8, value=tot_diff["Debe (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_diff, column=9, value=tot_diff["Haber (HT EF-4)"]).font = total_font
+    ws.cell(row=row_total_diff, column=10, value=tot_diff["Saldos Ajustados"]).font = total_font
+
+    for rr, fill in [(row_total_rub, total_fill), (row_total_cta, total_fill), (row_total_diff, diff_fill)]:
+        for cc in [4,5,6,7,8,9,10]:
+            ws.cell(row=rr, column=cc).number_format = '#,##0.00'
+            ws.cell(row=rr, column=cc).alignment = num_align
+        for cc in range(2, 11):
+            ws.cell(row=rr, column=cc).fill = fill
+            ws.cell(row=rr, column=cc).border = border
 
     ws.auto_filter.ref = f"B1:J{ws.max_row}"
     ws.freeze_panes = "B2"
 
-    # --------- Hoja de Auditoría: cuentas sin rubro ---------
+    # Auditoría
     if audit_rows:
         df_aud = pd.DataFrame(audit_rows)
         agg_cols = ["EF-1 Final", "EF-1 Apertura", "EF-2 Variación +", "EF-2 Variación -"]
@@ -596,7 +625,7 @@ def write_ht_ef4_estructura(
         df_aud["Observación"] = "Cuenta sin Rubro en Hoja de Trabajo"
         df_aud.to_excel(writer, index=False, sheet_name="Auditoría (Sin Rubro)")
 
-    # === DEVOLVER df_all para usarlo en 'Estructura EF-4 (Detalle)' ===
+    # devolver para Estructura EF-4 (Detalle)
     return df_all
 
 # =============================
@@ -609,7 +638,6 @@ def write_estructura_ef4_detalle(
     df_ht_estructura_all: pd.DataFrame,
     sheet_name: str = "Estructura EF-4 (Detalle)",
 ):
-    # Validar columnas EF-4 y Actividad en Hoja de Trabajo
     ef4_col = _pick_col(df_equiv_ht, ["EF-4", "EF4", "EF_4"], must_contain="ef")
     act_col = _pick_col(df_equiv_ht, ["Actividad", "Actividad EF-4", "Actividad_EF4", "Actividad EF4"], must_contain="activ")
     cta_col = "Cuentas Contables"
@@ -619,7 +647,6 @@ def write_estructura_ef4_detalle(
         ws.cell(row=1, column=1, value="No se encontraron columnas 'EF-4' y/o 'Actividad' en 'Hoja de Trabajo'.")
         return
 
-    # Mapear cuenta -> EF-4 / Actividad
     df_map = df_equiv_ht[[cta_col, ef4_col, act_col]].copy()
     df_map[cta_col] = df_map[cta_col].astype(str).map(_norm_account_code)
     df_map[ef4_col] = df_map[ef4_col].astype(str).str.strip().replace({"": np.nan}).fillna(MISSING_EF4_LABEL)
@@ -628,7 +655,6 @@ def write_estructura_ef4_detalle(
     map_cta_to_ef4 = dict(zip(df_map[cta_col], df_map[ef4_col]))
     map_cta_to_act = dict(zip(df_map[cta_col], df_map[act_col]))
 
-    # Base: tomar Cuenta Contable + Saldos Ajustados desde HT EF-4 (Estructura)
     if df_ht_estructura_all is None or df_ht_estructura_all.empty:
         ws = writer.book.create_sheet("Aviso_Estructura_EF4")
         ws.cell(row=1, column=1, value="No se pudo leer el detalle de 'HT EF-4 (Estructura)'.")
@@ -639,15 +665,12 @@ def write_estructura_ef4_detalle(
     base = base[base["Cuenta Contable"].astype(str).str.strip() != ""]
     base["Cuenta_norm"] = base["Cuenta Contable"].astype(str).map(_norm_account_code)
 
-    # Adjuntar EF-4 / Actividad
     base["EF-4"] = base["Cuenta_norm"].map(map_cta_to_ef4).fillna(MISSING_EF4_LABEL)
     base["Actividad"] = base["Cuenta_norm"].map(map_cta_to_act).fillna(MISSING_ACT_LABEL)
 
-    # Agrupar por cuenta por si está repetida
     base = (base.groupby(["EF-4", "Actividad", "Cuenta Contable"], as_index=False)["Saldos Ajustados"]
                  .sum(numeric_only=True))
 
-    # ORDEN: usar hoja "Estructura EF-4" si existe
     ef4_struct_name = _find_estructura_ef4_sheet_name(equiv_bytes)
 
     def order_from_struct():
@@ -667,25 +690,20 @@ def write_estructura_ef4_detalle(
                 tmp["__ord"] = pd.to_numeric(tmp[ordc], errors="coerce")
             else:
                 tmp["__ord"] = np.nan
-            # Orden EF-4
             order_ef4 = []
             seen = set()
-            tmp_ef4 = tmp[[ef4c, "__ord", "_row"]].dropna(subset=[ef4c])
-            tmp_ef4 = tmp_ef4.sort_values(["__ord", "_row"], na_position="last", kind="mergesort")
+            tmp_ef4 = tmp[[ef4c, "__ord", "_row"]].dropna(subset=[ef4c]).sort_values(["__ord", "_row"], na_position="last", kind="mergesort")
             for v in tmp_ef4[ef4c].astype(str):
                 if v not in seen:
                     seen.add(v)
                     order_ef4.append(v)
-            # Orden Actividad por EF-4
             order_act = {}
             if actc:
                 for ef in order_ef4:
                     blk = tmp[tmp[ef4c].astype(str) == ef]
                     seen2 = set()
                     acts = []
-                    blk2 = blk[[actc, "__ord", "_row"]].dropna(subset=[actc]).sort_values(
-                        ["__ord", "_row"], na_position="last", kind="mergesort"
-                    )
+                    blk2 = blk[[actc, "__ord", "_row"]].dropna(subset=[actc]).sort_values(["__ord", "_row"], na_position="last", kind="mergesort")
                     for a in blk2[actc].astype(str):
                         if a not in seen2:
                             seen2.add(a)
@@ -697,7 +715,6 @@ def write_estructura_ef4_detalle(
 
     order_ef4, order_act_map = order_from_struct()
 
-    # Si no hay estructura, usar orden de aparición en Hoja de Trabajo
     if not order_ef4:
         tmp_ht = df_map[[ef4_col, act_col]].copy()
         tmp_ht["_row"] = np.arange(len(tmp_ht))
@@ -717,14 +734,12 @@ def write_estructura_ef4_detalle(
                     acts.append(a)
             order_act_map[ef] = acts
 
-    # Último recurso: usar orden alfabético
     if not order_ef4:
         order_ef4 = sorted(base["EF-4"].unique())
     for ef in order_ef4:
         if ef not in order_act_map:
             order_act_map[ef] = sorted(base.loc[base["EF-4"] == ef, "Actividad"].unique())
 
-    # Construir salida
     ws = writer.book.create_sheet(sheet_name)
     headers = ["EF-4", "Actividad", "Cuenta Contable", "Saldos Ajustados"]
     for j, h in enumerate(headers, start=1):
@@ -734,7 +749,6 @@ def write_estructura_ef4_detalle(
         cell.alignment = Alignment(horizontal="center")
 
     row_ptr = 2
-    # bordes y formatos
     thin = Side(style="thin", color="FFBFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     num_fmt = '#,##0.00'
@@ -751,31 +765,23 @@ def write_estructura_ef4_detalle(
                 ws.cell(row=r, column=c).alignment = Alignment(horizontal="right")
 
     total_general = 0.0
-
     for ef in order_ef4:
         df_ef = base[base["EF-4"] == ef].copy()
         if df_ef.empty:
             continue
-
-        # Totales por EF-4 se suman al final del bloque
         ef_total = 0.0
-
         acts = order_act_map.get(ef, sorted(df_ef["Actividad"].unique()))
         for act in acts:
             df_act = df_ef[df_ef["Actividad"] == act].copy()
             if df_act.empty:
                 continue
-
-            # Total por actividad
             act_total = float(df_act["Saldos Ajustados"].sum())
             write_total_row(row_ptr, ef, act, act_total, "FFF7F7F7")
             row_ptr += 1
-
-            # Detalle por cuenta
             df_act = df_act.sort_values(["Cuenta Contable"]).drop_duplicates(subset=["Cuenta Contable"], keep="first")
             for _, r in df_act.iterrows():
-                ws.cell(row=row_ptr, column=1, value="")  # EF-4 vacío en detalle
-                ws.cell(row=row_ptr, column=2, value="")  # Actividad vacía en detalle
+                ws.cell(row=row_ptr, column=1, value="")
+                ws.cell(row=row_ptr, column=2, value="")
                 ws.cell(row=row_ptr, column=3, value=str(r["Cuenta Contable"]))
                 ws.cell(row=row_ptr, column=4, value=float(r["Saldos Ajustados"]))
                 ws.cell(row=row_ptr, column=4).number_format = num_fmt
@@ -783,43 +789,33 @@ def write_estructura_ef4_detalle(
                 for c in range(1, 5):
                     ws.cell(row=row_ptr, column=c).border = border
                 row_ptr += 1
-
             ef_total += act_total
-            # línea en blanco entre actividades
             row_ptr += 1
-
-        # Total por EF-4
         write_total_row(row_ptr, f"TOTAL {ef}", "", ef_total, "FFE9F5FF")
         row_ptr += 2
-
         total_general += ef_total
-
-    # Total general
     write_total_row(row_ptr, "TOTAL GENERAL", "", total_general, "FFFFF2CC")
-
-    # Anchos
     widths = {1: 38, 2: 42, 3: 22, 4: 18}
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 # =============================
-# Exportadores (SIEMPRE openpyxl)
+# Exportadores
 # =============================
 def _compute_maps_para_estructura(df_result: pd.DataFrame):
     """
-    Devuelve mapas EXCLUSIVOS de Tipo1_sin_1101:
-      - acc_debe_map / acc_haber_map: por CUENTA (clave_cta), sumas de debe_adj/haber_adj
-      - rub_debe_map / rub_haber_map: por RUBRO, sumas de debe_adj/haber_adj
+    Mapas EXCLUSIVOS de Tipo1_sin_1101:
+      - acc_debe_map / acc_haber_map: por CUENTA (clave_cta)
+      - rub_debe_map / rub_haber_map: por RUBRO
     Criterio:
       * tipo_ctb == "1"
-      * Excluir expedientes cuyo 'mayor' == "1101" (se excluye TODO el exp_contable)
+      * Excluir expedientes con mayor == "1101"
     """
     acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = {}, {}, {}, {}
     if "tipo_ctb" not in df_result.columns:
         return acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map
 
     df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
-
     mayor_series = df_result["mayor"].astype(str) if "mayor" in df_result.columns else pd.Series("", index=df_result.index)
     exp_con_1101 = set(df_result.loc[mayor_series.eq("1101"), "exp_contable"].unique())
     in_1101 = df_tipo1["exp_contable"].isin(exp_con_1101)
@@ -832,12 +828,10 @@ def _compute_maps_para_estructura(df_result: pd.DataFrame):
         if col in df_tipo1_sin1101.columns:
             df_tipo1_sin1101[col] = pd.to_numeric(df_tipo1_sin1101[col], errors="coerce").fillna(0.0)
 
-    # Por cuenta (clave_cta)
     acc = df_tipo1_sin1101.groupby("clave_cta")[["debe_adj", "haber_adj"]].sum(numeric_only=True).reset_index()
     acc_debe_map = dict(zip(acc["clave_cta"], acc["debe_adj"]))
     acc_haber_map = dict(zip(acc["clave_cta"], acc["haber_adj"]))
 
-    # Por rubro (relleno de vacíos a "(Sin Rubro)")
     if "Rubros" in df_tipo1_sin1101.columns:
         tmp = df_tipo1_sin1101.copy()
         tmp["Rubros"] = tmp["Rubros"].astype(str)
@@ -858,11 +852,10 @@ def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_byt
         # Resultado General
         df_result.to_excel(writer, index=False, sheet_name="Resultado General")
 
-        # Particiones tipo_ctb (informativas)
+        # Particiones tipo_ctb
         if "tipo_ctb" in df_result.columns:
             mayor_series = df_result["mayor"].astype(str) if "mayor" in df_result.columns else pd.Series("", index=df_result.index)
             exp_con_1101 = set(df_result.loc[mayor_series.eq("1101"), "exp_contable"].unique())
-
             df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
             in_1101 = df_tipo1["exp_contable"].isin(exp_con_1101)
             df_tipo1_con1101 = df_tipo1[in_1101].copy()
@@ -874,60 +867,7 @@ def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_byt
                 writer, index=False, sheet_name="Avisos"
             )
 
-        # Hojas nuevas
-        write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
-
-        # Mapas Debe/Haber para Estructura (EXCLUSIVOS Tipo1_sin_1101)
-        acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
-
-        # EF-2: variaciones POR CUENTA
-        ef2_acc_plus_map, ef2_acc_minus_map = _compute_ef2_variaciones_por_cuenta(equiv_bytes, df_equiv_ht)
-
-        df_all = write_ht_ef4_estructura(
-            writer, equiv_bytes, df_equiv_ht,
-            sheet_name="HT EF-4 (Estructura)",
-            acc_debe_map=acc_debe_map,
-            acc_haber_map=acc_haber_map,
-            rub_debe_map=rub_debe_map,
-            rub_haber_map=rub_haber_map,
-            ef2_acc_plus_map=ef2_acc_plus_map,
-            ef2_acc_minus_map=ef2_acc_minus_map,
-        )
-
-        # Nueva hoja: Estructura EF-4 (Detalle)
-        write_estructura_ef4_detalle(writer, equiv_bytes, df_equiv_ht, df_all, sheet_name="Estructura EF-4 (Detalle)")
-
-    output.seek(0)
-    return output
-
-def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame) -> BytesIO:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # 1) Original
-        df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
-        df_original.to_excel(writer, index=False, sheet_name="Original")
-
-        # 2) Resultado General
-        df_result.to_excel(writer, index=False, sheet_name="Resultado General")
-
-        # 3) Particiones tipo_ctb (y conservar df_tipo1_sin1101 para sumar en G/H)
-        mayor_series = df_result["mayor"].astype(str) if "mayor" in df_result.columns else pd.Series("", index=df_result.index)
-        exp_con_1101 = set(df_result.loc[mayor_series.eq("1101"), "exp_contable"].unique())
-
-        df_tipo1_sin1101 = pd.DataFrame()
-        if "tipo_ctb" in df_result.columns:
-            df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
-            in_1101 = df_tipo1["exp_contable"].isin(exp_con_1101)
-            df_tipo1_con1101 = df_tipo1[in_1101].copy()
-            df_tipo1_sin1101 = df_tipo1[~in_1101].copy()
-            df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
-            df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
-        else:
-            pd.DataFrame({"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}).to_excel(
-                writer, index=False, sheet_name="Avisos"
-            )
-
-        # 4) Copiar hoja HT EF-4 original desde Equivalencias y escribir G/H por Rubro (Tipo1_sin_1101)
+        # Copiar y sumar HT EF-4 original (G/H) desde Tipo1_sin_1101
         book_equiv = openpyxl.load_workbook(BytesIO(equiv_bytes))
         if COPIABLE_SHEET in book_equiv.sheetnames:
             src_ws = book_equiv[COPIABLE_SHEET]
@@ -938,7 +878,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
             rub_debe_map_norm = { _norm_text(k): v for k, v in (rub_debe_map or {}).items() }
             rub_haber_map_norm = { _norm_text(k): v for k, v in (rub_haber_map or {}).items() }
 
-            if not df_tipo1_sin1101.empty and "Rubros" in df_tipo1_sin1101.columns:
+            if "Rubros" in df_result.columns:
                 merged_ranges = dst_ws.merged_cells.ranges
                 for i, row in enumerate(dst_ws.iter_rows(min_row=2), start=2):
                     rubro_val = row[1].value  # col B
@@ -956,10 +896,10 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
             ws = writer.book.create_sheet("Aviso_HT_EF4")
             ws.cell(row=1, column=1, value=f"No se encontró la hoja '{COPIABLE_SHEET}' en el archivo de Equivalencias.")
 
-        # 5) Hojas nuevas
+        # Hojas nuevas
         write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
 
-        # Para Estructura (con Debe/Haber por cuenta y EF-2 en filas de cuenta) + Auditoría + Totales
+        # Mapas Debe/Haber
         acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
         ef2_acc_plus_map, ef2_acc_minus_map = _compute_ef2_variaciones_por_cuenta(equiv_bytes, df_equiv_ht)
 
@@ -974,7 +914,88 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
             ef2_acc_minus_map=ef2_acc_minus_map,
         )
 
-        # Nueva hoja: Estructura EF-4 (Detalle)
+        # Estructura EF-4 (Detalle)
+        write_estructura_ef4_detalle(writer, equiv_bytes, df_equiv_ht, df_all, sheet_name="Estructura EF-4 (Detalle)")
+
+    output.seek(0)
+    return output
+
+def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame) -> BytesIO:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # Original
+        df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
+        df_original.to_excel(writer, index=False, sheet_name="Original")
+
+        # Resultado General
+        df_result.to_excel(writer, index=False, sheet_name="Resultado General")
+
+        # Particiones tipo_ctb
+        mayor_series = df_result["mayor"].astype(str) if "mayor" in df_result.columns else pd.Series("", index=df_result.index)
+        exp_con_1101 = set(df_result.loc[mayor_series.eq("1101"), "exp_contable"].unique())
+
+        df_tipo1_sin1101 = pd.DataFrame()
+        if "tipo_ctb" in df_result.columns:
+            df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
+            in_1101 = df_tipo1["exp_contable"].isin(exp_con_1101)
+            df_tipo1_con1101 = df_tipo1[in_1101].copy()
+            df_tipo1_sin1101 = df_tipo1[~in_1101].copy()
+            df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
+            df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
+        else:
+            pd.DataFrame({"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}).to_excel(
+                writer, index=False, sheet_name="Avisos"
+            )
+
+        # Copiar HT EF-4 original con G/H (Tipo1_sin_1101)
+        book_equiv = openpyxl.load_workbook(BytesIO(equiv_bytes))
+        if COPIABLE_SHEET in book_equiv.sheetnames:
+            src_ws = book_equiv[COPIABLE_SHEET]
+            dst_ws = writer.book.create_sheet(COPIABLE_SHEET)
+            copy_sheet_with_styles(src_ws, dst_ws)
+
+            acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
+            rub_debe_map_norm = { _norm_text(k): v for k, v in (rub_debe_map or {}).items() }
+            rub_haber_map_norm = { _norm_text(k): v for k, v in (rub_haber_map or {}).items() }
+
+            if not df_tipo1_sin1101.empty and "Rubros" in df_tipo1_sin1101.columns:
+                merged_ranges = dst_ws.merged_cells.ranges
+                for i, row in enumerate(dst_ws.iter_rows(min_row=2), start=2):
+                    rubro_val = row[1].value
+                    rubro = str(rubro_val).strip() if rubro_val is not None else ""
+                    if not rubro:
+                        continue
+                    rnorm = _norm_text(rubro)
+                    debe_sum = float(rub_debe_map_norm.get(rnorm, 0.0))
+                    haber_sum = float(rub_haber_map_norm.get(rnorm, 0.0))
+                    if not is_inside_merged_area(i, 7, merged_ranges):
+                        dst_ws.cell(row=i, column=7, value=debe_sum).number_format = '#,##0.00'
+                    if not is_inside_merged_area(i, 8, merged_ranges):
+                        dst_ws.cell(row=i, column=8, value=haber_sum).number_format = '#,##0.00'
+        else:
+            ws = writer.book.create_sheet("Aviso_HT_EF4")
+            ws.cell(row=1, column=1, value=f"No se encontró la hoja '{COPIABLE_SHEET}' en el archivo de Equivalencias.")
+
+        # Compilada
+        write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
+
+        # Mapas y EF-2
+        acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
+        ef2_acc_plus_map, ef2_acc_minus_map = _compute_ef2_variaciones_por_cuenta(equiv_bytes, df_equiv_ht)
+
+        # Estructura (con totales al pie)
+        df_all = write_ht_ef4_estructura(
+            writer, equiv_bytes, df_equiv_ht,
+            sheet_name="HT EF-4 (Estructura)",
+            acc_debe_map=acc_debe_map,
+            acc_haber_map=acc_haber_map,
+            rub_debe_map=rub_debe_map,
+            rub_haber_map=rub_haber_map,
+            ef2_acc_plus_map=ef2_acc_plus_map,
+            ef2_acc_minus_map=ef2_acc_minus_map,
+        )
+
+        # Estructura EF-4 (Detalle)
         write_estructura_ef4_detalle(writer, equiv_bytes, df_equiv_ht, df_all, sheet_name="Estructura EF-4 (Detalle)")
 
     output.seek(0)
@@ -991,7 +1012,7 @@ with opt_col1:
         help="Si no marcas esta opción, igual se crearán las hojas HT EF-4 (Compilada), HT EF-4 (Estructura) y Estructura EF-4 (Detalle)."
     )
 with opt_col2:
-    st.caption("El 2º archivo (Equivalencias) debe contener 'Hoja de Trabajo' (con EF-4 y Actividad), 'EF-1 Apertura', 'EF-1 Final', opcional 'EF-2 Final' y preferible 'Estructura EF-4'.")
+    st.caption("El 2º archivo (Equivalencias) debe contener 'Hoja de Trabajo' (con EF-4 y Actividad), 'EF-1 Apertura', 'EF-1 Final', opcional 'EF-2 Final' y preferible 'Estructura del archivo' / 'Estructura EF-4'.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -1004,13 +1025,11 @@ if uploaded_file and equiv_file:
         main_bytes = _read_file_bytes(uploaded_file)
         equiv_bytes = _read_file_bytes(equiv_file)
 
-        # Carga y procesamiento
         df_main = load_main_df(main_bytes)
-        df_equiv_ht = load_equiv_df(equiv_bytes)  # Mapeo Rubros/EF-4/Actividad desde "Hoja de Trabajo"
+        df_equiv_ht = load_equiv_df(equiv_bytes)
         df_proc = compute_adjusted(df_main.copy())
         df_final = merge_equivalences(df_proc, df_equiv_ht)
 
-        # Excel según opción
         if copy_ht:
             xls_bytes = build_excel_with_ht(main_bytes, df_final, equiv_bytes, df_equiv_ht)
             fname = "resultado_exp_contable_con_HT_EF4.xlsx"
