@@ -159,28 +159,29 @@ def _find_sheet_name(equiv_bytes: bytes, patterns: list[str]) -> str | None:
 
 # =============================
 # (1) HT EF-4 (Compilada): EF-1 Apertura + EF-1 Final con columna "Rubros" añadida a la derecha
+#     (Escritura con openpyxl directo para evitar reescrituras)
 # =============================
-def write_ht_ef4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame, sheet_name: str = "HT EF-4 (Compilada)"):
+def write_ht_ef_4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame, sheet_name: str = "HT EF-4 (Compilada)"):
     # Map Cuentas -> Rubros (desde "Hoja de Trabajo")
     map_cta_to_rubro = dict(zip(df_equiv_ht["Cuentas Contables"], df_equiv_ht["Rubros"]))
 
     ap_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*apert"])
     fi_name = _find_sheet_name(equiv_bytes, [r"ef\s*1.*final"])
 
-    startrow = 0
-    for label, real_name in [("EF-1 Apertura", ap_name), ("EF-1 Final", fi_name)]:
-        # título de sección
-        pd.DataFrame([["Sección:", label]]).to_excel(
-            writer, sheet_name=sheet_name, startrow=startrow, index=False, header=False
-        )
-        startrow += 1
+    ws = writer.book.create_sheet(sheet_name)
+    row_ptr = 1
+
+    def dump_section(label: str, real_name: str | None):
+        nonlocal row_ptr, ws
+        # Título de sección (col B: "Sección:", col C: label)
+        ws.cell(row=row_ptr, column=2, value="Sección:")
+        ws.cell(row=row_ptr, column=3, value=label)
+        row_ptr += 1
 
         if not real_name:
-            pd.DataFrame([["(No se encontró la hoja solicitada)"]]).to_excel(
-                writer, sheet_name=sheet_name, startrow=startrow, index=False, header=False
-            )
-            startrow += 2
-            continue
+            ws.cell(row=row_ptr, column=2, value="(No se encontró la hoja solicitada)")
+            row_ptr += 2
+            return
 
         df_sec = pd.read_excel(BytesIO(equiv_bytes), sheet_name=real_name, dtype=str, engine="openpyxl")
         df_sec.columns = [str(c).strip() for c in df_sec.columns]
@@ -190,9 +191,22 @@ def write_ht_ef4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame
             df_out["Rubros"] = df_out[cta_col].astype(str).map(map_cta_to_rubro).fillna("")
         else:
             df_out["Rubros"] = ""
-        # escribir la tabla con Rubros agregada
-        df_out.to_excel(writer, sheet_name=sheet_name, startrow=startrow, index=False)
-        startrow += len(df_out) + 2  # línea en blanco
+
+        # Escribir encabezados
+        for j, col in enumerate(df_out.columns, start=1):
+            ws.cell(row=row_ptr, column=j, value=col)
+        row_ptr_local = row_ptr + 1
+
+        # Escribir datos
+        for _, r in df_out.iterrows():
+            for j, col in enumerate(df_out.columns, start=1):
+                ws.cell(row=row_ptr_local, column=j, value=str(r[col]) if pd.notna(r[col]) else "")
+            row_ptr_local += 1
+
+        row_ptr = row_ptr_local + 1  # línea en blanco
+
+    dump_section("EF-1 Apertura", ap_name)
+    dump_section("EF-1 Final", fi_name)
 
 # =============================
 # (2) HT EF-4 (Estructura): Respeta ESTRICTAMENTE la hoja "Estructura del archivo"
@@ -249,8 +263,21 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
         try:
             df_struct = pd.read_excel(BytesIO(equiv_bytes), sheet_name=struct_name, dtype=str, engine="openpyxl")
             df_struct.columns = [str(c).strip() for c in df_struct.columns]
-            rub_col = _pick_col(df_struct, ["Rubros", "Rubro"], must_contain="rubro")
-            ord_col = _pick_col(df_struct, ["Orden", "Order", "Ordenamiento", "N°", "No", "Nro"], must_contain="orden")
+
+            # ACEPTAR tus encabezados reales: 'Estructura' o 'DESCRIPCION', además de Rubros/Rubro
+            rub_col = _pick_col(
+                df_struct,
+                ["Rubros", "Rubro", "Estructura", "DESCRIPCION", "Descripción", "Descripcion"],
+            )
+            if rub_col is None:
+                # Fallback por contenido del nombre
+                rub_col = _pick_col(df_struct, [], must_contain="estruct") or _pick_col(df_struct, [], must_contain="descr")
+            # Columna de orden (varias variantes)
+            ord_col = _pick_col(
+                df_struct,
+                ["Orden", "Order", "Ordenamiento", "N°", "No", "Nro", "Nro."],
+                must_contain="orden",
+            )
 
             if rub_col is None:
                 return None
@@ -281,13 +308,8 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
     rubros_presentes = set(df_all["Rubros"].astype(str).str.strip().unique())
 
     if strict_order:
-        # Usar SOLO los rubros que están en la estructura y también presentes en datos, en ese mismo orden.
-        # Además, si en la estructura hay rubros sin cuentas en datos, IGUAL mostrarlos con "(sin cuentas)".
-        rubros_order = []
-        for r in strict_order:
-            r_clean = str(r).strip()
-            if r_clean:
-                rubros_order.append(r_clean)
+        # Usar rubros en el orden de estructura; si no hay cuentas, igual se mostrarán como "(sin cuentas)"
+        rubros_order = [str(r).strip() for r in strict_order if str(r).strip() != ""]
     else:
         # Fallback: solo rubros presentes, orden alfabético
         rubros_order = sorted(rubros_presentes)
@@ -386,7 +408,7 @@ def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_byt
             )
 
         # === NUEVAS hojas ===
-        write_ht_ef4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
+        write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
         write_ht_ef4_estructura(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Estructura)")
 
     output.seek(0)
@@ -427,7 +449,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
             ws.cell(row=1, column=1, value=f"No se encontró la hoja '{COPIABLE_SHEET}' en el archivo de Equivalencias.")
 
         # 5) === NUEVAS hojas ===
-        write_ht_ef4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
+        write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
         write_ht_ef4_estructura(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Estructura)")
 
     output.seek(0)
