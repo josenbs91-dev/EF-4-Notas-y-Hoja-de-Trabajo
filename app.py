@@ -302,7 +302,6 @@ def write_ht_ef4_estructura(
     ef2_acc_plus_map = ef2_acc_plus_map or {}
     ef2_acc_minus_map = ef2_acc_minus_map or {}
 
-    # ---------- Normalización para mapas ----------
     # Mapeo de Cuentas -> Rubros desde "Hoja de Trabajo" (con fallback normalizado)
     map_cta_to_rubro_raw = dict(zip(df_equiv_ht["Cuentas Contables"].astype(str).str.strip(),
                                     df_equiv_ht["Rubros"].astype(str).str.strip()))
@@ -310,11 +309,10 @@ def write_ht_ef4_estructura(
     def _get_rubro_for_account(cta_code: str) -> str:
         return map_cta_to_rubro_raw.get(cta_code) or map_cta_to_rubro_norm.get(_norm_account_code(cta_code), MISSING_RUBRO_LABEL)
 
-    # Mapas Debe/Haber por cuenta (desde principal, tipo_ctb==1 sin 1101) + normalizados
+    # ---- CLAVE: estos mapas vienen EXCLUSIVAMENTE de Tipo1_sin_1101 ----
+    # (se calculan en _compute_maps_para_estructura y aquí solo se consumen)
     acc_debe_map_norm = { _norm_account_code(k): v for k, v in (acc_debe_map or {}).items() }
     acc_haber_map_norm = { _norm_account_code(k): v for k, v in (acc_haber_map or {}).items() }
-
-    # Mapas Debe/Haber por rubro (desde principal, tipo_ctb==1 sin 1101) + normalizados
     rub_debe_map_norm = { _norm_text(k): v for k, v in (rub_debe_map or {}).items() }
     rub_haber_map_norm = { _norm_text(k): v for k, v in (rub_haber_map or {}).items() }
 
@@ -342,10 +340,11 @@ def write_ht_ef4_estructura(
     ap_df = read_importes(ap_name)
     fi_df = read_importes(fi_name)
 
-    # --- Conjunto de CUENTAS a mostrar (incluye EF-2 también) ---
+    # --- Conjunto de CUENTAS a mostrar (incluye EF-2 y TODAS las del principal Tipo1_sin_1101) ---
     cuentas_ef1 = set(ap_df["Cuenta"]).union(set(fi_df["Cuenta"]))
     cuentas_ef2 = set(ef2_acc_plus_map.keys()).union(set(ef2_acc_minus_map.keys()))
-    cuentas = sorted(cuentas_ef1.union(cuentas_ef2))
+    cuentas_main_norm = set(acc_debe_map_norm.keys()).union(set(acc_haber_map_norm.keys()))
+    cuentas = sorted(cuentas_ef1.union(cuentas_ef2).union(cuentas_main_norm))
 
     # --- Construcción por cuenta + recolectar cuentas sin rubro para auditoría ---
     audit_rows = []
@@ -368,15 +367,15 @@ def write_ht_ef4_estructura(
             var_plus = 0.0
             var_minus = 0.0
 
-        # SUMA EF-2 a NIVEL CUENTA
+        # SUMA EF-2 a NIVEL CUENTA (no afecta Debe/Haber HT)
         ef2_plus = float(ef2_acc_plus_map.get(cta, 0.0))
         ef2_minus = float(ef2_acc_minus_map.get(cta, 0.0))
         var_plus += ef2_plus
         var_minus += ef2_minus
 
-        # Debe/Haber (HT) por cuenta (BUSCA NORMALIZADO EN TIPO1_sin_1101)
-        debe_ht = float(acc_debe_map.get(cta, acc_debe_map_norm.get(_norm_account_code(cta), 0.0)))
-        haber_ht = float(acc_haber_map.get(cta, acc_haber_map_norm.get(_norm_account_code(cta), 0.0)))
+        # Debe/Haber (HT) por cuenta -> EXCLUSIVAMENTE Tipo1_sin_1101
+        debe_ht = float(acc_debe_map_norm.get(_norm_account_code(cta), 0.0))
+        haber_ht = float(acc_haber_map_norm.get(_norm_account_code(cta), 0.0))
 
         # Saldos Ajustados por cuenta
         saldo_aj = fi_val + var_plus - ap_val - var_minus
@@ -394,7 +393,6 @@ def write_ht_ef4_estructura(
             "Saldos Ajustados": saldo_aj
         })
 
-        # Auditoría: si no hay rubro mapeado
         if rub == MISSING_RUBRO_LABEL:
             audit_rows.append({
                 "Cuenta Contable": cta,
@@ -435,7 +433,6 @@ def write_ht_ef4_estructura(
                 ordered = [str(x).strip() for x in tmp[rub_col].tolist()]
             else:
                 ordered = [str(x).strip() for x in df_struct[rub_col].tolist()]
-
             seen, final = set(), []
             for r in ordered:
                 if r and r not in seen:
@@ -449,7 +446,6 @@ def write_ht_ef4_estructura(
     if strict_order and len([x for x in strict_order if str(x).strip()]) > 0:
         rubros_order = [str(r).strip() for r in strict_order if str(r).strip() != ""]
     else:
-        # Fallback sólido: usa los rubros de la Hoja de Trabajo (preserva orden y quita vacíos)
         rubros_from_equiv = [str(x).strip() for x in df_equiv_ht["Rubros"].astype(str).tolist() if str(x).strip() != ""]
         if rubros_from_equiv:
             seen, rubros_order = set(), []
@@ -458,16 +454,14 @@ def write_ht_ef4_estructura(
                     seen.add(r)
                     rubros_order.append(r)
         else:
-            # Último recurso: rubros presentes en df_all
             rubros_presentes = [str(x).strip() for x in df_all["Rubros"].astype(str).unique() if str(x).strip() != ""]
             rubros_order = sorted(rubros_presentes) if rubros_presentes else []
 
-    # Si hay cuentas bajo "(Sin Rubro)", agrega ese rubro al final
     if MISSING_RUBRO_LABEL in set(df_all["Rubros"].astype(str)):
         if MISSING_RUBRO_LABEL not in rubros_order:
             rubros_order.append(MISSING_RUBRO_LABEL)
 
-    # Totales por rubro (YA incluyen EF-2 por cuenta) agrupando por rubro normalizado
+    # Totales por rubro (incluyen EF-2 por cuenta) agrupando por rubro normalizado
     df_all["_rub_norm"] = df_all["Rubros_norm"]
     totals_norm = (
         df_all.groupby("_rub_norm")[["EF-1 Final", "EF-1 Apertura", "Variación +", "Variación -", "Saldos Ajustados"]]
@@ -489,15 +483,15 @@ def write_ht_ef4_estructura(
         block = df_all[df_all["_rub_norm"] == rub_norm].copy()
         block = block.sort_values(["Cuenta Contable"]).drop_duplicates(subset=["Cuenta Contable"], keep="first")
         if block.empty:
-            # Debe/Haber por rubro (desde maps, match normalizado)
-            debe_r = float(rub_debe_map.get(rub, rub_debe_map_norm.get(rub_norm, 0.0)))
-            haber_r = float(rub_haber_map.get(rub, rub_haber_map_norm.get(rub_norm, 0.0)))
+            # Debe/Haber por rubro -> EXCLUSIVAMENTE desde Tipo1_sin_1101 (maps normalizados)
+            debe_r = float(rub_debe_map_norm.get(rub_norm, 0.0))
+            haber_r = float(rub_haber_map_norm.get(rub_norm, 0.0))
             out_rows.append(["", "", "(sin cuentas)", 0.0, 0.0, 0.0, 0.0, debe_r, haber_r, 0.0])
         else:
             for _, r in block.iterrows():
-                # Debe/Haber por cuenta (preferir normalizado)
-                debe_ht = float(acc_debe_map.get(r["Cuenta Contable"], acc_debe_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0)))
-                haber_ht = float(acc_haber_map.get(r["Cuenta Contable"], acc_haber_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0)))
+                # Debe/Haber por cuenta -> EXCLUSIVAMENTE desde Tipo1_sin_1101 (maps normalizados)
+                debe_ht = float(acc_debe_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0))
+                haber_ht = float(acc_haber_map_norm.get(_norm_account_code(r["Cuenta Contable"]), 0.0))
                 out_rows.append([
                     "", "",
                     r["Cuenta Contable"],
@@ -558,9 +552,9 @@ def write_ht_ef4_estructura(
             ws.cell(row=r, column=5, value=float(totals_norm.get("EF-1 Apertura", {}).get(rub_norm, 0.0))).font = rubro_font
             ws.cell(row=r, column=6, value=float(totals_norm.get("Variación +", {}).get(rub_norm, 0.0))).font = rubro_font
             ws.cell(row=r, column=7, value=float(totals_norm.get("Variación -", {}).get(rub_norm, 0.0))).font = rubro_font
-            # Debe/Haber por rubro (desde Tipo1_sin_1101; match normalizado)
-            ws.cell(row=r, column=8, value=float(rub_debe_map.get(rub, rub_debe_map_norm.get(rub_norm, 0.0)))).font = rubro_font
-            ws.cell(row=r, column=9, value=float(rub_haber_map.get(rub, rub_haber_map_norm.get(rub_norm, 0.0)))).font = rubro_font
+            # Debe/Haber por rubro -> EXCLUSIVAMENTE Tipo1_sin_1101 (match normalizado)
+            ws.cell(row=r, column=8, value=float(rub_debe_map_norm.get(rub_norm, 0.0))).font = rubro_font
+            ws.cell(row=r, column=9, value=float(rub_haber_map_norm.get(rub_norm, 0.0))).font = rubro_font
             ws.cell(row=r, column=10, value=float(totals_norm.get("Saldos Ajustados", {}).get(rub_norm, 0.0))).font = rubro_font
 
     # Bordes finos en B1:Jmax
@@ -582,6 +576,7 @@ def write_ht_ef4_estructura(
         "Variación +": sum((totals_norm.get("Variación +", {}) or {}).values()),
         "Variación -": sum((totals_norm.get("Variación -", {}) or {}).values()),
         "Saldos Ajustados": sum((totals_norm.get("Saldos Ajustados", {}) or {}).values()),
+        # Debe/Haber -> EXCLUSIVAMENTE de Tipo1_sin_1101
         "Debe (HT EF-4)": float(sum((rub_debe_map_norm or {}).values())),
         "Haber (HT EF-4)": float(sum((rub_haber_map_norm or {}).values())),
     }
@@ -657,7 +652,14 @@ def write_ht_ef4_estructura(
 # Exportadores (SIEMPRE openpyxl)
 # =============================
 def _compute_maps_para_estructura(df_result: pd.DataFrame):
-    """Devuelve mapas: (acc_debe, acc_haber, rub_debe, rub_haber) usando tipo_ctb==1 y excluyendo exp de mayor 1101."""
+    """
+    Devuelve mapas EXCLUSIVOS de Tipo1_sin_1101:
+      - acc_debe_map / acc_haber_map: por CUENTA (clave_cta), sumas de debe_adj/haber_adj
+      - rub_debe_map / rub_haber_map: por RUBRO, sumas de debe_adj/haber_adj
+    Criterio:
+      * tipo_ctb == "1"
+      * Excluir expedientes cuyo 'mayor' == "1101" (se excluye TODO el exp_contable)
+    """
     acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = {}, {}, {}, {}
     if "tipo_ctb" not in df_result.columns:
         return acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map
@@ -682,9 +684,12 @@ def _compute_maps_para_estructura(df_result: pd.DataFrame):
     acc_debe_map = dict(zip(acc["clave_cta"], acc["debe_adj"]))
     acc_haber_map = dict(zip(acc["clave_cta"], acc["haber_adj"]))
 
-    # Por rubro
+    # Por rubro (llenar vacíos como "(Sin Rubro)" para que no se pierdan en la suma)
     if "Rubros" in df_tipo1_sin1101.columns:
-        rub = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum(numeric_only=True).reset_index()
+        tmp = df_tipo1_sin1101.copy()
+        tmp["Rubros"] = tmp["Rubros"].astype(str)
+        tmp["Rubros"] = tmp["Rubros"].replace({"": np.nan}).fillna(MISSING_RUBRO_LABEL)
+        rub = tmp.groupby("Rubros")[["debe_adj", "haber_adj"]].sum(numeric_only=True).reset_index()
         rub_debe_map = dict(zip(rub["Rubros"], rub["debe_adj"]))
         rub_haber_map = dict(zip(rub["Rubros"], rub["haber_adj"]))
 
@@ -719,7 +724,7 @@ def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_byt
         # Hojas nuevas
         write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
 
-        # Mapas Debe/Haber para Estructura
+        # Mapas Debe/Haber para Estructura (EXCLUSIVOS Tipo1_sin_1101)
         acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
 
         # EF-2: variaciones POR CUENTA
@@ -766,14 +771,15 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
                 writer, index=False, sheet_name="Avisos"
             )
 
-        # 4) Copiar hoja HT EF-4 original desde Equivalencias y escribir G/H por Rubro (match normalizado)
+        # 4) Copiar hoja HT EF-4 original desde Equivalencias y escribir G/H por Rubro
+        #    (G/H SIEMPRE desde Tipo1_sin_1101)
         book_equiv = openpyxl.load_workbook(BytesIO(equiv_bytes))
         if COPIABLE_SHEET in book_equiv.sheetnames:
             src_ws = book_equiv[COPIABLE_SHEET]
             dst_ws = writer.book.create_sheet(COPIABLE_SHEET)
             copy_sheet_with_styles(src_ws, dst_ws)
 
-            # Mapas de Debe/Haber (HT) por rubro/cta
+            # Mapas Debe/Haber (HT) por rubro/cta -> EXCLUSIVOS Tipo1_sin_1101
             acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
             rub_debe_map_norm = { _norm_text(k): v for k, v in (rub_debe_map or {}).items() }
             rub_haber_map_norm = { _norm_text(k): v for k, v in (rub_haber_map or {}).items() }
@@ -787,8 +793,8 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
                     if not rubro:
                         continue
                     rnorm = _norm_text(rubro)
-                    debe_sum = float(rub_debe_map.get(rubro, rub_debe_map_norm.get(rnorm, 0.0)))
-                    haber_sum = float(rub_haber_map.get(rubro, rub_haber_map_norm.get(rnorm, 0.0)))
+                    debe_sum = float(rub_debe_map_norm.get(rnorm, 0.0))
+                    haber_sum = float(rub_haber_map_norm.get(rnorm, 0.0))
                     if not is_inside_merged_area(i, 7, merged_ranges):
                         dst_ws.cell(row=i, column=7, value=debe_sum).number_format = '#,##0.00'
                     if not is_inside_merged_area(i, 8, merged_ranges):
@@ -801,6 +807,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
         write_ht_ef_4_compilada(writer, equiv_bytes, df_equiv_ht, sheet_name="HT EF-4 (Compilada)")
 
         # Para Estructura (con Debe/Haber por cuenta y EF-2 en filas de cuenta) + Auditoría + Totales
+        # Debe/Haber -> EXCLUSIVAMENTE desde Tipo1_sin_1101
         acc_debe_map, acc_haber_map, rub_debe_map, rub_haber_map = _compute_maps_para_estructura(df_result)
         ef2_acc_plus_map, ef2_acc_minus_map = _compute_ef2_variaciones_por_cuenta(equiv_bytes, df_equiv_ht)
 
