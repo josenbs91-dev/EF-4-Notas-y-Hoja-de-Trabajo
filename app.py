@@ -195,8 +195,9 @@ def write_ht_ef4_compilada(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame
         startrow += len(df_out) + 2  # línea en blanco
 
 # =============================
-# (2) HT EF-4 (Estructura): Rubro → Cuentas únicas, con Importes de Apertura y Final a la derecha
-#     + FORMATO (negritas, anchos, bordes, números, autofiltro, freeze panes) y orden por 'Orden'
+# (2) HT EF-4 (Estructura): Respeta ESTRICTAMENTE la hoja "Estructura del archivo"
+#     Rubro → Cuentas únicas (Apertura+Final) + Importes (Apertura | Final)
+#     Incluye rubros sin cuentas con fila "(sin cuentas)" y aplica formato
 # =============================
 def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFrame, sheet_name: str = "HT EF-4 (Estructura)"):
     # Mapeo de Cuentas -> Rubros desde "Hoja de Trabajo"
@@ -224,7 +225,7 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
     ap_df = read_importes(ap_name)
     fi_df = read_importes(fi_name)
 
-    # Unión de cuentas y mapeo a Rubro
+    # --- Consolidado (cuentas únicas y sus importes)
     cuentas = sorted(set(ap_df["Cuenta"]).union(set(fi_df["Cuenta"])))
     data = []
     for cta in cuentas:
@@ -232,16 +233,16 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
         ap_val = float(ap_df.loc[ap_df["Cuenta"] == cta, "Importe"].sum()) if not ap_df.empty else 0.0
         fi_val = float(fi_df.loc[fi_df["Cuenta"] == cta, "Importe"].sum()) if not fi_df.empty else 0.0
         data.append({"Rubros": rub, "Cuenta Contable": cta, "EF-1 Apertura": ap_val, "EF-1 Final": fi_val})
-
     df_all = pd.DataFrame(data)
+
     if df_all.empty:
         pd.DataFrame({"info": ["No se pudieron consolidar Importes de EF-1 Apertura/Final."]}).to_excel(
             writer, index=False, sheet_name=sheet_name
         )
         return
 
-    # --- Orden de Rubros desde la hoja "Estructura del archivo" usando su columna 'Orden' ---
-    def rubros_order_from_structure() -> list | None:
+    # --- Obtener ORDEN ESTRICTO desde 'Estructura del archivo'
+    def struct_order_strict() -> list | None:
         struct_name = _find_sheet_name(equiv_bytes, [r"estructura.*archivo", r"estructura"])
         if not struct_name:
             return None
@@ -250,43 +251,62 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
             df_struct.columns = [str(c).strip() for c in df_struct.columns]
             rub_col = _pick_col(df_struct, ["Rubros", "Rubro"], must_contain="rubro")
             ord_col = _pick_col(df_struct, ["Orden", "Order", "Ordenamiento", "N°", "No", "Nro"], must_contain="orden")
-            if not rub_col or not ord_col:
+
+            if rub_col is None:
                 return None
-            tmp = df_struct[[ord_col, rub_col]].copy()
-            tmp[rub_col] = tmp[rub_col].astype(str).str.strip()
-            tmp[ord_col] = pd.to_numeric(tmp[ord_col], errors="coerce")  # no numéricos al final
-            tmp = tmp.dropna(subset=[rub_col])
-            # Orden estable por 'Orden' asc y Rubro (para empates)
-            tmp = tmp.sort_values([ord_col, rub_col], na_position="last", kind="mergesort")
-            seen, out = set(), []
-            for _, r in tmp.iterrows():
-                rub = str(r[rub_col]).strip()
-                if rub and rub not in seen:
-                    out.append(rub)
-                    seen.add(rub)
-            return out
+
+            if ord_col:
+                tmp = df_struct[[ord_col, rub_col]].copy()
+                tmp[ord_col] = pd.to_numeric(tmp[ord_col], errors="coerce")
+                tmp["_row"] = np.arange(len(tmp))
+                tmp = tmp.sort_values([ord_col, "_row"], na_position="last", kind="mergesort")
+                ordered_rubros = [str(x).strip() for x in tmp[rub_col].tolist()]
+            else:
+                # Sin 'Orden': usar fila tal cual
+                ordered_rubros = [str(x).strip() for x in df_struct[rub_col].tolist()]
+
+            # Quitar vacíos y duplicados preservando la primera aparición
+            seen, final = set(), []
+            for r in ordered_rubros:
+                if r and r not in seen:
+                    seen.add(r)
+                    final.append(r)
+            return final
         except Exception:
             return None
 
-    rub_set = set(df_all["Rubros"].astype(str).str.strip().unique())
-    order_from_struct = rubros_order_from_structure()
-    if order_from_struct:
-        # Mantener solo rubros presentes y anexar los faltantes al final (orden alfabético)
-        ordered = [r for r in order_from_struct if r in rub_set]
-        remaining = sorted([r for r in rub_set if r not in ordered])
-        rubros_order = ordered + remaining
-    else:
-        rubros_order = sorted(rub_set)
+    strict_order = struct_order_strict()
 
-    # --- Construcción del layout final ---
+    # Conjunto de rubros presentes en datos
+    rubros_presentes = set(df_all["Rubros"].astype(str).str.strip().unique())
+
+    if strict_order:
+        # Usar SOLO los rubros que están en la estructura y también presentes en datos, en ese mismo orden.
+        # Además, si en la estructura hay rubros sin cuentas en datos, IGUAL mostrarlos con "(sin cuentas)".
+        rubros_order = []
+        for r in strict_order:
+            r_clean = str(r).strip()
+            if r_clean:
+                rubros_order.append(r_clean)
+    else:
+        # Fallback: solo rubros presentes, orden alfabético
+        rubros_order = sorted(rubros_presentes)
+
+    # --- Construir layout final (incluyendo rubros sin cuentas)
     rows = []
     rows.append(["", "Rubro", "Cuenta Contable", "EF-1 Apertura", "EF-1 Final"])  # encabezado
     for rub in rubros_order:
         rows.append(["", rub, "", "", ""])
         block = df_all[df_all["Rubros"].astype(str).str.strip() == str(rub)]
         block = block.sort_values(["Cuenta Contable"]).drop_duplicates(subset=["Cuenta Contable"], keep="first")
-        for _, r in block.iterrows():
-            rows.append(["", "", r["Cuenta Contable"], float(r["EF-1 Apertura"]), float(r["EF-1 Final"])])
+
+        if block.empty:
+            # Mostrar rubro aunque no tenga cuentas
+            rows.append(["", "", "(sin cuentas)", 0.0, 0.0])
+        else:
+            for _, r in block.iterrows():
+                rows.append(["", "", r["Cuenta Contable"], float(r["EF-1 Apertura"]), float(r["EF-1 Final"])])
+
         rows.append(["", "", "", "", ""])  # línea en blanco
 
     out_df = pd.DataFrame(rows[1:], columns=rows[0])
@@ -296,7 +316,7 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
     ws = writer.book[sheet_name]
     max_row = ws.max_row
     # Anchuras
-    widths = {2: 42, 3: 20, 4: 18, 5: 18}  # B..E
+    widths = {2: 42, 3: 22, 4: 18, 5: 18}  # B..E
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
@@ -317,7 +337,7 @@ def write_ht_ef4_estructura(writer, equiv_bytes: bytes, df_equiv_ht: pd.DataFram
             ws.cell(row=r, column=c).number_format = '#,##0.00'
             ws.cell(row=r, column=c).alignment = num_align
 
-    # Negritas para filas de Rubro (B con texto y C vacío)
+    # Negritas para filas de Rubro (B con texto y C vacío o '(sin cuentas)')
     rubro_fill = PatternFill("solid", fgColor="FFF7F7F7")
     rubro_font = Font(bold=True)
     for r in range(2, max_row + 1):
