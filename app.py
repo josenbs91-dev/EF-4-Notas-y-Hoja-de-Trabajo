@@ -2,20 +2,23 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
+import openpyxl
+from copy import copy
 
 # =============================
 # Configuración básica
 # =============================
 st.set_page_config(page_title="Procesador de Exp Contable - SIAF", layout="wide")
-st.title("Procesador de Exp Contable - SIAF (Excel simplificado)")
+st.title("Procesador de Exp Contable - SIAF")
 
 # Constantes
 REQUIRED_FOR_EXP = ["ano_eje", "nro_not_exp", "ciclo", "fase"]
 NUMERIC_COLS = ["debe", "haber", "saldo"]
 EQUIV_SHEET = "Hoja de Trabajo"
+COPIABLE_SHEET = "HT EF-4"
 
 # =============================
-# Utilidades
+# Utilidades / Helpers
 # =============================
 @st.cache_data(show_spinner=False)
 def _read_file_bytes(uploaded_file) -> bytes:
@@ -97,39 +100,58 @@ def merge_equivalences(df: pd.DataFrame, df_equiv: pd.DataFrame) -> pd.DataFrame
         how="left",
     )
 
-def build_simple_excel(main_bytes: bytes, df_result: pd.DataFrame) -> BytesIO:
-    """Genera un Excel liviano con hojas: Original, Resultado General y particiones tipo_ctb."""
-    output = BytesIO()
+def copy_sheet_with_styles(src_ws: openpyxl.worksheet.worksheet.Worksheet,
+                           dst_ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
+    """Copia valores, estilos y rangos combinados."""
+    for row in src_ws.iter_rows():
+        for cell in row:
+            new_cell = dst_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                new_cell.font = copy(cell.font)
+                new_cell.border = copy(cell.border)
+                new_cell.fill = copy(cell.fill)
+                new_cell.number_format = copy(cell.number_format)
+                new_cell.protection = copy(cell.protection)
+                new_cell.alignment = copy(cell.alignment)
+    for merged_range in src_ws.merged_cells.ranges:
+        dst_ws.merge_cells(str(merged_range))
 
-    # ⚠️ Importante: NO pasar 'options' al ExcelWriter (evita el error reportado)
-    # Requiere tener instalado 'xlsxwriter' para mejor rendimiento de escritura.
+def is_inside_merged_area(row: int, col: int, merged_ranges) -> bool:
+    for rng in merged_ranges:
+        if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+            return True
+    return False
+
+def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame) -> BytesIO:
+    """
+    Excel rápido (sin copiar HT EF-4): Original, Resultado General, Tipo1_con_1101/Tipo1_sin_1101 o Avisos.
+    Usa xlsxwriter si está disponible, de lo contrario openpyxl.
+    """
+    output = BytesIO()
     try:
+        # Writer rápido
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            # Hoja Original (sin coerción extra para velocidad)
+            # Original
             df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
             df_original.to_excel(writer, index=False, sheet_name="Original")
-
-            # Resultado General
+            # Resultado
             df_result.to_excel(writer, index=False, sheet_name="Resultado General")
-
-            # Particiones tipo_ctb == 1
+            # Particiones
             if "tipo_ctb" in df_result.columns:
                 df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
-
                 in_1101 = df_tipo1["exp_contable"].isin(
                     set(df_result.loc[df_result.get("mayor", "").astype(str).eq("1101"), "exp_contable"].unique())
                 )
                 df_tipo1_con1101 = df_tipo1[in_1101].copy()
                 df_tipo1_sin1101 = df_tipo1[~in_1101].copy()
-
                 df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
                 df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
             else:
-                pd.DataFrame(
-                    {"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}
-                ).to_excel(writer, index=False, sheet_name="Avisos")
+                pd.DataFrame({"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}).to_excel(
+                    writer, index=False, sheet_name="Avisos"
+                )
     except Exception:
-        # Fallback: si no tienes xlsxwriter instalado, usa openpyxl
+        # Fallback a openpyxl
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
             df_original.to_excel(writer, index=False, sheet_name="Original")
@@ -151,9 +173,83 @@ def build_simple_excel(main_bytes: bytes, df_result: pd.DataFrame) -> BytesIO:
     output.seek(0)
     return output
 
+def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes: bytes) -> BytesIO:
+    """
+    Excel con copia de hoja HT EF-4 y sumas por Rubro (columnas G/H) usando openpyxl.
+    """
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # 1) Original
+        df_original = pd.read_excel(BytesIO(main_bytes), dtype=str, engine="openpyxl")
+        df_original.to_excel(writer, index=False, sheet_name="Original")
+
+        # 2) Resultado General
+        df_result.to_excel(writer, index=False, sheet_name="Resultado General")
+
+        # 3) Particiones tipo_ctb
+        if "tipo_ctb" in df_result.columns:
+            df_tipo1 = df_result[df_result["tipo_ctb"].astype(str) == "1"].copy()
+            in_1101 = df_tipo1["exp_contable"].isin(
+                set(df_result.loc[df_result.get("mayor", "").astype(str).eq("1101"), "exp_contable"].unique())
+            )
+            df_tipo1_con1101 = df_tipo1[in_1101].copy()
+            df_tipo1_sin1101 = df_tipo1[~in_1101].copy()
+            df_tipo1_con1101.to_excel(writer, index=False, sheet_name="Tipo1_con_1101")
+            df_tipo1_sin1101.to_excel(writer, index=False, sheet_name="Tipo1_sin_1101")
+        else:
+            df_tipo1_sin1101 = pd.DataFrame()
+            pd.DataFrame({"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}).to_excel(
+                writer, index=False, sheet_name="Avisos"
+            )
+
+        # 4) Copiar hoja HT EF-4 desde equivalencias y escribir sumas G/H
+        book_equiv = openpyxl.load_workbook(BytesIO(equiv_bytes))
+        book_result = writer.book
+
+        if COPIABLE_SHEET in book_equiv.sheetnames:
+            src_ws = book_equiv[COPIABLE_SHEET]
+            dst_ws = book_result.create_sheet(COPIABLE_SHEET)
+            copy_sheet_with_styles(src_ws, dst_ws)
+
+            # Si tenemos df_tipo1_sin1101 y Rubros, sumar y escribir
+            if not df_tipo1_sin1101.empty and ("Rubros" in df_tipo1_sin1101.columns):
+                # Agrupar por Rubros
+                df_sum = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum(numeric_only=True).reset_index()
+                dict_debe = dict(zip(df_sum["Rubros"], df_sum["debe_adj"]))
+                dict_haber = dict(zip(df_sum["Rubros"], df_sum["haber_adj"]))
+
+                merged_ranges = dst_ws.merged_cells.ranges
+
+                # Recorremos filas a partir de la 2 (asumiendo títulos en fila 1)
+                # Rubro esperado en columna B (índice 2 => col=2). Sumas en G (7) y H (8)
+                for i, row in enumerate(dst_ws.iter_rows(min_row=2), start=2):
+                    rubro_val = row[1].value  # columna B
+                    rubro = str(rubro_val).strip() if rubro_val is not None else ""
+                    if not rubro:
+                        continue
+                    debe_sum = float(dict_debe.get(rubro, 0.0))
+                    haber_sum = float(dict_haber.get(rubro, 0.0))
+                    if not is_inside_merged_area(i, 7, merged_ranges):
+                        dst_ws.cell(row=i, column=7, value=debe_sum)
+                    if not is_inside_merged_area(i, 8, merged_ranges):
+                        dst_ws.cell(row=i, column=8, value=haber_sum)
+        else:
+            # Hoja de aviso si no existe la hoja copiable
+            ws = writer.book.create_sheet("Aviso_HT_EF4")
+            ws.cell(row=1, column=1, value=f"No se encontró la hoja '{COPIABLE_SHEET}' en el archivo de Equivalencias.")
+
+    output.seek(0)
+    return output
+
 # =============================
 # UI
 # =============================
+opt_col1, opt_col2 = st.columns([1, 1])
+with opt_col1:
+    copy_ht = st.checkbox("Copiar hoja HT EF-4 y llenar sumas (más pesado)", value=True, help="Si tu archivo es grande y se demora, desactívalo para generar un Excel rápido sin HT EF-4.")
+with opt_col2:
+    st.caption("Cuando está activado, se copia la hoja 'HT EF-4' con estilos y se llenan las columnas G/H con sumas por 'Rubros' de 'Tipo1_sin_1101'.")
+
 col1, col2 = st.columns(2)
 with col1:
     uploaded_file = st.file_uploader("Sube tu archivo Excel principal", type=["xlsx"], key="main")
@@ -171,14 +267,19 @@ if uploaded_file and equiv_file:
         df_proc = compute_adjusted(df_main.copy())
         df_final = merge_equivalences(df_proc, df_equiv)
 
-        # Excel simplificado
-        xls_bytes = build_simple_excel(main_bytes, df_final)
+        # Excel según opción
+        if copy_ht:
+            xls_bytes = build_excel_with_ht(main_bytes, df_final, equiv_bytes)
+            fname = "resultado_exp_contable_con_HT_EF4.xlsx"
+        else:
+            xls_bytes = build_excel_without_ht(main_bytes, df_final)
+            fname = "resultado_exp_contable_simplificado.xlsx"
 
         st.success("Procesamiento completado.")
         st.download_button(
-            label="Descargar resultado en Excel (simplificado)",
+            label=f"Descargar {fname}",
             data=xls_bytes.getvalue(),
-            file_name="resultado_exp_contable_simplificado.xlsx",
+            file_name=fname,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
