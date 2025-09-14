@@ -122,10 +122,55 @@ def is_inside_merged_area(row: int, col: int, merged_ranges) -> bool:
             return True
     return False
 
+# =============================
+# Hoja adicional solicitada: NotaOper_01
+# =============================
+def write_nota_oper_01_sheet(writer, df_result: pd.DataFrame, sheet_name: str = "NotaOper_01"):
+    """
+    Crea una hoja filtrando nota_oper == '01-0000-001'.
+    Presenta 'Cuenta' = mayor.sub_cta y 'Saldo', agrupado por 'Rubros' (según equivalencias) y 'Cuenta'.
+    """
+    required = {"nota_oper", "mayor", "sub_cta", "saldo", "Rubros"}
+    missing = [c for c in required if c not in df_result.columns]
+    if missing:
+        # Crear hoja con un aviso si faltan columnas
+        pd.DataFrame({
+            "info": [f"No es posible crear '{sheet_name}'. Faltan columnas: {', '.join(missing)}"]
+        }).to_excel(writer, index=False, sheet_name=sheet_name)
+        return
+
+    df_f = df_result[df_result["nota_oper"].astype(str).str.strip() == "01-0000-001"].copy()
+    if df_f.empty:
+        pd.DataFrame({
+            "info": [f"No hay filas con nota_oper == '01-0000-001'."]
+        }).to_excel(writer, index=False, sheet_name=sheet_name)
+        return
+
+    # Construir cuenta mayor.sub_cta
+    df_f["Cuenta"] = (
+        df_f["mayor"].astype(str).str.strip() + "." + df_f["sub_cta"].astype(str).str.strip()
+    )
+    # Asegurar numérico en saldo
+    df_f["saldo"] = pd.to_numeric(df_f["saldo"], errors="coerce").fillna(0.0)
+
+    # Agrupar por Rubros y Cuenta (sumando saldos)
+    df_out = (df_f.groupby(["Rubros", "Cuenta"], as_index=False)["saldo"]
+              .sum(numeric_only=True)
+              .rename(columns={"saldo": "Saldo"}))
+
+    # Ordenar para lectura
+    df_out = df_out.sort_values(["Rubros", "Cuenta"]).reset_index(drop=True)
+
+    # Escribir hoja
+    df_out.to_excel(writer, index=False, sheet_name=sheet_name)
+
+# =============================
+# Exportadores
+# =============================
 def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame) -> BytesIO:
     """
-    Excel rápido (sin copiar HT EF-4): Original, Resultado General, Tipo1_con_1101/Tipo1_sin_1101 o Avisos.
-    Usa xlsxwriter si está disponible, de lo contrario openpyxl.
+    Excel rápido (sin copiar HT EF-4): Original, Resultado General, Tipo1_con_1101/Tipo1_sin_1101 o Avisos,
+    y la hoja adicional NotaOper_01.
     """
     output = BytesIO()
     try:
@@ -150,6 +195,10 @@ def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame) -> BytesI
                 pd.DataFrame({"info": ["No se encontró la columna 'tipo_ctb' en el archivo principal."]}).to_excel(
                     writer, index=False, sheet_name="Avisos"
                 )
+
+            # === Hoja adicional solicitada ===
+            write_nota_oper_01_sheet(writer, df_result, sheet_name="NotaOper_01")
+
     except Exception:
         # Fallback a openpyxl
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -170,12 +219,16 @@ def build_excel_without_ht(main_bytes: bytes, df_result: pd.DataFrame) -> BytesI
                     writer, index=False, sheet_name="Avisos"
                 )
 
+            # === Hoja adicional solicitada ===
+            write_nota_oper_01_sheet(writer, df_result, sheet_name="NotaOper_01")
+
     output.seek(0)
     return output
 
 def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes: bytes) -> BytesIO:
     """
     Excel con copia de hoja HT EF-4 y sumas por Rubro (columnas G/H) usando openpyxl.
+    Incluye también la hoja adicional NotaOper_01.
     """
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -212,7 +265,7 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
             copy_sheet_with_styles(src_ws, dst_ws)
 
             # Si tenemos df_tipo1_sin1101 y Rubros, sumar y escribir
-            if not df_tipo1_sin1101.empty and ("Rubros" in df_tipo1_sin1101.columns):
+            if 'df_tipo1_sin1101' in locals() and not df_tipo1_sin1101.empty and ("Rubros" in df_tipo1_sin1101.columns):
                 # Agrupar por Rubros
                 df_sum = df_tipo1_sin1101.groupby("Rubros")[["debe_adj", "haber_adj"]].sum(numeric_only=True).reset_index()
                 dict_debe = dict(zip(df_sum["Rubros"], df_sum["debe_adj"]))
@@ -237,6 +290,9 @@ def build_excel_with_ht(main_bytes: bytes, df_result: pd.DataFrame, equiv_bytes:
             # Hoja de aviso si no existe la hoja copiable
             ws = writer.book.create_sheet("Aviso_HT_EF4")
             ws.cell(row=1, column=1, value=f"No se encontró la hoja '{COPIABLE_SHEET}' en el archivo de Equivalencias.")
+
+        # 5) === Hoja adicional solicitada ===
+        write_nota_oper_01_sheet(writer, df_result, sheet_name="NotaOper_01")
 
     output.seek(0)
     return output
